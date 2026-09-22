@@ -32,6 +32,9 @@ uint8_t wifiMaintProfileCount();
 String wifiMaintProfileSsid(uint8_t ordinal);
 int wifiMaintPreferredProfile();
 bool wifiMaintSelectProfile(int ordinal);
+bool wifiMaintDeleteProfile(uint8_t ordinal);
+String wifiMaintLastFailureSsid();
+String wifiMaintLastFailure();
 
 // GitHub Release self-update (available only in HOME WIFI maintenance mode).
 void wifiMaintCheckLatestRelease();

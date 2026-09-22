@@ -903,3 +903,15 @@ v1.9.8 shared MIDI / panel volume
 - The on-screen VOL value and VOLUME popup follow keyboard volume changes.
 - After external CC7 changes the value, the physical VOL knob re-enters pickup
   mode so touching it does not cause an abrupt volume jump.
+
+
+v1.9.9 stronger real-time TVF sweep
+-----------------------------------
+- Corrected SAM2695 GS PART addressing. MIDI channels 1/2/3 use GS parts
+  1/2/3 under the default assignment; part 0 is MIDI channel 10 (drums).
+- Assignable Controller 1 uses internal CC16 and Assignable Controller 2 uses
+  internal CC17; both are configured for TVF cutoff only.
+- CC1 and CC2 cutoff effects are stacked at full positive range.
+- Static NRPN TVF cutoff is anchored at 0 so the live controllers sweep upward
+  from the dark end instead of only adding a small brightening above neutral.
+- Resonance remains on NRPN 0121 for now.

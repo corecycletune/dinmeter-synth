@@ -724,3 +724,21 @@ selection.
 Switching networks intentionally drops the current browser connection. After
 the switch, reconnect the PC/phone to the selected LAN/hotspot if needed and
 open http://dinmeter.local/ again.
+
+
+v1.8.9 physical Wi-Fi selection
+-------------------------------
+SYSTEM MENU now includes WIFI SELECT.
+
+WIFI SELECT shows:
+- AUTO
+- each saved Wi-Fi profile
+- * on the currently preferred selection
+
+Turn the encoder to choose a network and press to connect. Choosing a saved
+profile makes it preferred and immediately enters MAINTENANCE using that
+network. Choosing AUTO clears the preference and enters MAINTENANCE using
+automatic saved-network selection. Holding the encoder returns to SYSTEM MENU.
+
+This closes the gap in v1.8.8, where manual profile switching existed only in
+the maintenance browser UI.

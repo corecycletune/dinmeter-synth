@@ -894,3 +894,12 @@ v1.9.7 live filter + MIDI fixes
   respond without a new NoteOn.
 - Resonance still uses the SAM2695 NRPN/TVF parameter path and remains a
   separate item for real-device verification.
+
+
+v1.9.8 shared MIDI / panel volume
+---------------------------------
+- Incoming MIDI CC7 now controls the same masterVolume state as PERFORMANCE
+  8Angle VOL.
+- The on-screen VOL value and VOLUME popup follow keyboard volume changes.
+- After external CC7 changes the value, the physical VOL knob re-enters pickup
+  mode so touching it does not cause an abrupt volume jump.

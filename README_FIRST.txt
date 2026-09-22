@@ -872,3 +872,11 @@ v1.9.5 primary UI alignment
   the display window.
 - Top tabs, parameter columns, status text, separators and hazard stripes now
   share the same inset.
+
+
+v1.9.6 UI readability refinement
+--------------------------------
+- Primary PERFORMANCE / CONFIG inset increased from 3 px to 6 px.
+- PAGE CHANGE overlay now uses larger white page text (text size 2).
+- PAGE CHANGE overlay remains visible for 500 ms for easier reading while
+  rotating the encoder.

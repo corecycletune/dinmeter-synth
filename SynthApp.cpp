@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.8.8
+  Version: v1.8.9
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -34,7 +34,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.8.8";
+  "DINMETER_FW_VERSION=v1.8.9";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -352,6 +352,9 @@ bool lastMaintUiUpdating = false;
 bool systemMenuActive = false;
 uint8_t systemMenuIndex = 0;
 
+bool wifiSelectActive = false;
+uint8_t wifiSelectIndex = 0;  // 0=AUTO, 1..N=saved Wi-Fi profile
+
 bool maintenanceConfirm = false;
 bool maintenanceChoiceYes = false;
 
@@ -363,11 +366,12 @@ bool usbFlashChoiceYes = false;
 
 bool systemInfoActive = false;
 
-static constexpr uint8_t SYSTEM_MENU_COUNT = 6;
+static constexpr uint8_t SYSTEM_MENU_COUNT = 7;
 static const char* SYSTEM_MENU_ITEMS[SYSTEM_MENU_COUNT] = {
   "SAVE PRESET",
   "MAINTENANCE",
   "WIFI SETUP",
+  "WIFI SELECT",
   "USB FLASH",
   "SYSTEM INFO",
   "EXIT"
@@ -1595,7 +1599,7 @@ void handleConfigModeChange(bool newMode) {
 }
 
 void poll8Angle() {
-  if (wifiMaintActive() || systemMenuActive || saveDialog ||
+  if (wifiMaintActive() || systemMenuActive || wifiSelectActive || saveDialog ||
       maintenanceConfirm || systemInfoActive) return;
 
   uint32_t nowMs = millis();
@@ -1768,7 +1772,7 @@ void handleBytePress(uint8_t logical) {
 }
 
 void pollByteButton() {
-  if (wifiMaintActive() || systemMenuActive || saveDialog ||
+  if (wifiMaintActive() || systemMenuActive || wifiSelectActive || saveDialog ||
       maintenanceConfirm || systemInfoActive) return;
 
   uint32_t nowMs = millis();
@@ -1853,6 +1857,7 @@ void openSystemMenu() {
   systemMenuIndex = 0;
 
   saveDialog = false;
+  wifiSelectActive = false;
   maintenanceConfirm = false;
   usbFlashConfirm = false;
   systemInfoActive = false;
@@ -1865,6 +1870,7 @@ void openSystemMenu() {
 void closeSystemMenu() {
   systemMenuActive = false;
   saveDialog = false;
+  wifiSelectActive = false;
   maintenanceConfirm = false;
   usbFlashConfirm = false;
   systemInfoActive = false;
@@ -2019,20 +2025,32 @@ void selectSystemMenuItem() {
       enterWifiSetupMode();
       return;
 
-    case 3: // USB FLASH
+    case 3: // WIFI SELECT
+      systemMenuActive = false;
+      wifiSelectActive = true;
+      {
+        int preferred = wifiMaintPreferredProfile();
+        wifiSelectIndex = (preferred >= 0) ? (uint8_t)(preferred + 1) : 0;
+        uint8_t optionCount = wifiMaintProfileCount() + 1;
+        if (wifiSelectIndex >= optionCount) wifiSelectIndex = 0;
+      }
+      screenDirty = true;
+      return;
+
+    case 4: // USB FLASH
       systemMenuActive = false;
       usbFlashConfirm = true;
       usbFlashChoiceYes = false;
       screenDirty = true;
       return;
 
-    case 4: // SYSTEM INFO
+    case 5: // SYSTEM INFO
       systemMenuActive = false;
       systemInfoActive = true;
       screenDirty = true;
       return;
 
-    case 5: // EXIT
+    case 6: // EXIT
     default:
       closeSystemMenu();
       return;
@@ -2067,6 +2085,17 @@ void handleEncoderRotate(int detents) {
   if (detents == 0) return;
 
   if (wifiMaintActive()) {
+    return;
+  }
+
+  if (wifiSelectActive) {
+    int optionCount = (int)wifiMaintProfileCount() + 1; // AUTO + saved profiles
+    if (optionCount < 1) optionCount = 1;
+    int next = (int)wifiSelectIndex + detents;
+    while (next < 0) next += optionCount;
+    while (next >= optionCount) next -= optionCount;
+    wifiSelectIndex = (uint8_t)next;
+    screenDirty = true;
     return;
   }
 
@@ -2159,6 +2188,23 @@ void handleEncoderShortPress() {
     return;
   }
 
+  if (wifiSelectActive) {
+    int selectedProfile = (wifiSelectIndex == 0) ? -1 : ((int)wifiSelectIndex - 1);
+    if (wifiMaintSelectProfile(selectedProfile)) {
+      wifiSelectActive = false;
+      enterMaintenanceMode();
+    } else {
+      wifiSelectActive = false;
+      systemMenuActive = true;
+      snprintf(overlayTitle, sizeof(overlayTitle), "WIFI SELECT");
+      snprintf(overlaySub, sizeof(overlaySub), "PROFILE NOT FOUND");
+      overlayActive = true;
+      overlayUntil = millis() + 900;
+      screenDirty = true;
+    }
+    return;
+  }
+
   if (systemInfoActive) {
     systemInfoActive = false;
     systemMenuActive = true;
@@ -2226,6 +2272,14 @@ void handleEncoderLongPress() {
     exitWifiRuntime();
     return;
   }
+
+  if (wifiSelectActive) {
+    wifiSelectActive = false;
+    systemMenuActive = true;
+    screenDirty = true;
+    return;
+  }
+
   if (saveDialog || maintenanceConfirm || usbFlashConfirm || systemInfoActive) return;
 
   if (systemMenuActive) {
@@ -2339,10 +2393,10 @@ void drawSystemMenu() {
   M5.Display.setTextSize(1);
 
   for (uint8_t i = 0; i < SYSTEM_MENU_COUNT; ++i) {
-    int y = 46 + i * 13;
+    int y = 44 + i * 11;
 
     if (i == systemMenuIndex) {
-      M5.Display.fillRect(10, y - 2, w - 20, 13, C_YELLOW);
+      M5.Display.fillRect(10, y - 2, w - 20, 11, C_YELLOW);
       M5.Display.setTextColor(C_BLACK, C_YELLOW);
       M5.Display.setCursor(15, y);
       M5.Display.print("> ");
@@ -2358,6 +2412,54 @@ void drawSystemMenu() {
   M5.Display.setTextColor(C_GREY, C_BLACK);
   M5.Display.setCursor(10, 126);
   M5.Display.print("TURN=SELECT  PUSH=ENTER  HOLD=EXIT");
+}
+
+void drawWifiSelect() {
+  clearScreen();
+  int w = M5.Display.width();
+
+  drawHazardStripe(0, 9);
+  M5.Display.drawRect(5, 14, w - 10, 116, C_AMBER);
+
+  M5.Display.setTextColor(C_YELLOW, C_BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(10, 20);
+  M5.Display.print("WIFI SELECT");
+
+  M5.Display.setTextSize(1);
+
+  uint8_t profileCount = wifiMaintProfileCount();
+  uint8_t optionCount = profileCount + 1;
+  int preferred = wifiMaintPreferredProfile();
+
+  for (uint8_t option = 0; option < optionCount; ++option) {
+    int y = 46 + option * 12;
+    bool selected = option == wifiSelectIndex;
+    bool preferredHere = (option == 0) ? (preferred < 0)
+                                       : (preferred == (int)option - 1);
+
+    if (selected) {
+      M5.Display.fillRect(10, y - 2, w - 20, 11, C_YELLOW);
+      M5.Display.setTextColor(C_BLACK, C_YELLOW);
+    } else {
+      M5.Display.setTextColor(C_WHITE, C_BLACK);
+    }
+
+    M5.Display.setCursor(15, y);
+    M5.Display.print(selected ? "> " : "  ");
+
+    String label = (option == 0) ? String("AUTO")
+                                 : wifiMaintProfileSsid(option - 1);
+    if (label.length() > 25) {
+      label = label.substring(0, 22) + "...";
+    }
+    M5.Display.print(label);
+    if (preferredHere) M5.Display.print(" *");
+  }
+
+  M5.Display.setTextColor(C_GREY, C_BLACK);
+  M5.Display.setCursor(10, 121);
+  M5.Display.print("*=PREFERRED  PUSH=CONNECT  HOLD=BACK");
 }
 
 void drawMaintenanceConfirm() {
@@ -2439,7 +2541,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.8.8");
+  M5.Display.print("FW          : v1.8.9");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -2493,7 +2595,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.8.8  LATEST ");
+    M5.Display.print("FW v1.8.9  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else {
     M5.Display.print("AP   : DinMeter-Setup");
@@ -2878,6 +2980,8 @@ void drawUiIfNeeded() {
     drawSystemInfo();
   } else if (usbFlashConfirm) {
     drawUsbFlashConfirm();
+  } else if (wifiSelectActive) {
+    drawWifiSelect();
   } else if (maintenanceConfirm) {
     drawMaintenanceConfirm();
   } else if (saveDialog) {
@@ -2997,7 +3101,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.8.8");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.8.9");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -3043,7 +3147,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.8.8
+  Version: v1.8.9
   END
   ======================================================================
 */

@@ -707,3 +707,20 @@ home and a phone hotspot/tethering network away from home.
 The maintenance browser lists saved networks and provides ADD / UPDATE WIFI
 and DELETE controls. Saving one profile no longer forces an immediate reboot,
 so several networks can be registered in one setup session.
+
+
+v1.8.8 Wi-Fi profile switching
+------------------------------
+Saved Wi-Fi profiles can now be switched manually from the maintenance browser.
+
+Each saved network has a SWITCH NOW control. Selecting one also stores it as
+the preferred profile, so future MAINTENANCE sessions try that network first.
+If the preferred network is unavailable, DinMeter falls back to automatic
+selection across all saved profiles.
+
+AUTO SELECT SAVED WIFI clears the preferred profile and returns to automatic
+selection.
+
+Switching networks intentionally drops the current browser connection. After
+the switch, reconnect the PC/phone to the selected LAN/hotspot if needed and
+open http://dinmeter.local/ again.

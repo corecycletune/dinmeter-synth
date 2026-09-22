@@ -670,3 +670,11 @@ Safety:
 - newer version -> UPGRADE
 
 Web OTA V2 verification and USB FLASH recovery remain unchanged.
+
+
+v1.8.4 Web OTA JavaScript fix
+------------------------------
+Fixed an extra closing brace in the generated findAscii() JavaScript function.
+The syntax error prevented the firmware file change handler from running, so
+the browser showed the selected filename but SELECTED/ACTION stayed unchanged.
+The server-side OTA endpoints were unaffected.

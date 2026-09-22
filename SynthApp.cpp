@@ -1628,7 +1628,7 @@ void handleConfigModeChange(bool newMode) {
 
 void poll8Angle() {
   if (wifiMaintActive() || systemMenuActive || wifiSelectActive || wifiSetupMenuActive ||
-      wifiScanListActive || wifiDeleteListActive || wifiDeleteConfirm || saveDialog ||
+      wifiScanListActive || textEditorActive || wifiDeleteListActive || wifiDeleteConfirm || saveDialog ||
       maintenanceConfirm || systemInfoActive) return;
 
   uint32_t nowMs = millis();
@@ -1953,7 +1953,7 @@ void handleBytePress(uint8_t logical) {
 
 void pollByteButton() {
   if (wifiMaintActive() || systemMenuActive || wifiSelectActive || wifiSetupMenuActive ||
-      wifiScanListActive || textEditorActive || wifiDeleteListActive || wifiDeleteConfirm || saveDialog ||
+      wifiScanListActive || wifiDeleteListActive || wifiDeleteConfirm || saveDialog ||
       maintenanceConfirm || systemInfoActive) return;
 
   uint32_t nowMs = millis();
@@ -2357,63 +2357,6 @@ void handleEncoderRotate(int detents) {
     return;
   }
 
-  if (textEditorActive) {
-    appendCurrentTextEditorChar();
-    return;
-  }
-
-  if (wifiScanListActive) {
-    uint8_t count = wifiMaintScanCount();
-
-    if (wifiScanIndex < count) {
-      String ssid = wifiMaintScanSsid(wifiScanIndex);
-
-      if (wifiMaintScanSaved(wifiScanIndex) || !wifiMaintScanSecured(wifiScanIndex)) {
-        if (wifiMaintSaveCredential(ssid, "", true)) {
-          wifiScanListActive = false;
-          enterMaintenanceMode();
-        } else {
-          wifiScanLastResult = -99;
-          screenDirty = true;
-        }
-        return;
-      }
-
-      beginTextEditor(TextEditorPurpose::WIFI_PASSWORD, ssid, "", 63);
-      return;
-    }
-
-    if (wifiScanIndex == count) {
-      startWifiScanUi();
-      return;
-    }
-
-    if (wifiScanIndex == count + 1) {
-      wifiScanListActive = false;
-      enterWifiSetupMode(); // manual/hidden-network browser fallback
-      return;
-    }
-
-    wifiScanListActive = false;
-    wifiSetupMenuActive = true;
-    wifiSetupMenuIndex = 0;
-    screenDirty = true;
-    return;
-  }
-
-  if (textEditorActive) {
-    cancelTextEditor();
-    return;
-  }
-
-  if (wifiScanListActive) {
-    wifiScanListActive = false;
-    wifiSetupMenuActive = true;
-    wifiSetupMenuIndex = 0;
-    screenDirty = true;
-    return;
-  }
-
   if (wifiDeleteConfirm) {
     wifiDeleteChoiceYes = (detents > 0);
     screenDirty = true;
@@ -2484,9 +2427,6 @@ void handleEncoderRotate(int detents) {
     snprintf(overlayTitle, sizeof(overlayTitle), "BANK SELECT");
     snprintf(overlaySub, sizeof(overlaySub), "BANK %u", browseBank + 1);
     overlayActive = true;
-
-    // v1.8.2: keep the bank-selection screen readable.
-    // Each encoder move refreshes this timer.
     overlayUntil = millis() + 1200;
     screenDirty = true;
   }
@@ -2517,6 +2457,52 @@ void handleEncoderShortPress() {
     }
 
     exitWifiRuntime();
+    return;
+  }
+
+  if (textEditorActive) {
+    appendCurrentTextEditorChar();
+    return;
+  }
+
+  if (wifiScanListActive) {
+    uint8_t count = wifiMaintScanCount();
+
+    if (wifiScanIndex < count) {
+      String ssid = wifiMaintScanSsid(wifiScanIndex);
+
+      // Already-saved profiles keep their existing password when blank is supplied.
+      // Open networks are stored with an empty password.
+      if (wifiMaintScanSaved(wifiScanIndex) || !wifiMaintScanSecured(wifiScanIndex)) {
+        if (wifiMaintSaveCredential(ssid, "", true)) {
+          wifiScanListActive = false;
+          enterMaintenanceMode();
+        } else {
+          wifiScanLastResult = -99;
+          screenDirty = true;
+        }
+        return;
+      }
+
+      beginTextEditor(TextEditorPurpose::WIFI_PASSWORD, ssid, "", 63);
+      return;
+    }
+
+    if (wifiScanIndex == count) {
+      startWifiScanUi();
+      return;
+    }
+
+    if (wifiScanIndex == count + 1) {
+      wifiScanListActive = false;
+      enterWifiSetupMode(); // hidden/manual network browser fallback
+      return;
+    }
+
+    wifiScanListActive = false;
+    wifiSetupMenuActive = true;
+    wifiSetupMenuIndex = 0;
+    screenDirty = true;
     return;
   }
 
@@ -2636,7 +2622,6 @@ void handleEncoderShortPress() {
     return;
   }
 
-  // Normal-mode short press remains reserved.
   snprintf(overlayTitle, sizeof(overlayTitle),
            configMode ? "CONFIG" : "MENU");
   snprintf(overlaySub, sizeof(overlaySub), "SHORT PRESS RESERVED");
@@ -2648,6 +2633,19 @@ void handleEncoderShortPress() {
 void handleEncoderLongPress() {
   if (wifiMaintActive()) {
     exitWifiRuntime();
+    return;
+  }
+
+  if (textEditorActive) {
+    cancelTextEditor();
+    return;
+  }
+
+  if (wifiScanListActive) {
+    wifiScanListActive = false;
+    wifiSetupMenuActive = true;
+    wifiSetupMenuIndex = 0;
+    screenDirty = true;
     return;
   }
 

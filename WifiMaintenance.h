@@ -36,6 +36,15 @@ bool wifiMaintDeleteProfile(uint8_t ordinal);
 String wifiMaintLastFailureSsid();
 String wifiMaintLastFailure();
 
+// On-device Wi-Fi setup support.
+int wifiMaintScanNetworks();
+uint8_t wifiMaintScanCount();
+String wifiMaintScanSsid(uint8_t index);
+int32_t wifiMaintScanRssi(uint8_t index);
+bool wifiMaintScanSecured(uint8_t index);
+bool wifiMaintScanSaved(uint8_t index);
+bool wifiMaintSaveCredential(const String& ssid, const String& pass, bool makePreferred = true);
+
 // GitHub Release self-update (available only in HOME WIFI maintenance mode).
 void wifiMaintCheckLatestRelease();
 void wifiMaintStartGithubUpdate();

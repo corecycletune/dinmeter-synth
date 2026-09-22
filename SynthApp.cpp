@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.0
+  Version: v1.9.1
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -34,7 +34,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.9.0";
+  "DINMETER_FW_VERSION=v1.9.1";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -357,6 +357,26 @@ uint8_t wifiSelectIndex = 0;  // 0=AUTO, 1..N=saved Wi-Fi profile
 
 bool wifiSetupMenuActive = false;
 uint8_t wifiSetupMenuIndex = 0;  // ADD / DELETE / BACK
+
+bool wifiScanListActive = false;
+uint8_t wifiScanIndex = 0;
+int wifiScanLastResult = 0;
+
+enum class TextEditorPurpose : uint8_t {
+  NONE = 0,
+  WIFI_PASSWORD,
+  PRESET_NAME
+};
+
+bool textEditorActive = false;
+TextEditorPurpose textEditorPurpose = TextEditorPurpose::NONE;
+String textEditorContext;
+String textEditorBuffer;
+String textEditorMessage;
+uint8_t textEditorGroup = 0;     // ABC / abc / 123 / symbols
+uint8_t textEditorCharIndex = 0;
+uint8_t textEditorMaxLen = 63;
+
 bool wifiDeleteListActive = false;
 uint8_t wifiDeleteIndex = 0;     // saved-profile ordinal, count means BACK
 bool wifiDeleteConfirm = false;
@@ -1053,6 +1073,7 @@ void clearScreen();
 void resetMaintenanceUiCache();
 void enterUsbFlashBootloader();
 void drawUsbFlashConfirm();
+void enterMaintenanceMode();
 
 // Forward declarations needed in a normal .cpp file.
 // Arduino auto-prototypes do not apply here.
@@ -1607,7 +1628,7 @@ void handleConfigModeChange(bool newMode) {
 
 void poll8Angle() {
   if (wifiMaintActive() || systemMenuActive || wifiSelectActive || wifiSetupMenuActive ||
-      wifiDeleteListActive || wifiDeleteConfirm || saveDialog ||
+      wifiScanListActive || textEditorActive || wifiDeleteListActive || wifiDeleteConfirm || saveDialog ||
       maintenanceConfirm || systemInfoActive) return;
 
   uint32_t nowMs = millis();
@@ -1760,7 +1781,158 @@ void toggleConfigButton(uint8_t logical) {
   updateByteLeds();
 }
 
+
+static const char* TEXT_GROUPS[4] = {
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+  "abcdefghijklmnopqrstuvwxyz",
+  "0123456789",
+  "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+};
+
+const char* textEditorChars() {
+  return TEXT_GROUPS[textEditorGroup < 4 ? textEditorGroup : 0];
+}
+
+void syncByteDebounceForMapping(bool leftToRight) {
+  uint32_t nowMs = millis();
+  for (uint8_t physical = 0; physical < 8; ++physical) {
+    uint8_t logical = leftToRight ? (7 - physical)
+                                  : (configMode ? (7 - physical) : physical);
+    bool raw = byteButton.getSwitchStatus(physical) != 0;
+    byteRaw[logical] = raw;
+    byteStable[logical] = raw;
+    byteChangedAt[logical] = nowMs;
+  }
+}
+
+void updateTextEditorByteLeds() {
+  for (uint8_t i = 0; i < 4; ++i) {
+    setLogicalByteLed(i,
+                      i == textEditorGroup ? 0x00FF50 : 0x302000,
+                      i == textEditorGroup ? 75 : 24);
+  }
+  setLogicalByteLed(4, 0x2050A0, 42);  // SPACE
+  setLogicalByteLed(5, 0x805000, 48);  // DELETE
+  setLogicalByteLed(6, 0xA02020, 52);  // CANCEL
+  setLogicalByteLed(7, 0x00A040, 58);  // OK
+}
+
+void restoreByteAfterTextEditor() {
+  syncByteDebounceForMapping(false);
+  updateByteLeds();
+}
+
+void beginTextEditor(TextEditorPurpose purpose,
+                     const String& context,
+                     const String& initial,
+                     uint8_t maxLen) {
+  textEditorPurpose = purpose;
+  textEditorContext = context;
+  textEditorBuffer = initial;
+  textEditorMaxLen = maxLen;
+  textEditorMessage = "";
+  textEditorGroup = 0;
+  textEditorCharIndex = 0;
+  textEditorActive = true;
+  wifiScanListActive = false;
+  wifiSetupMenuActive = false;
+
+  syncByteDebounceForMapping(true);
+  updateTextEditorByteLeds();
+  screenDirty = true;
+}
+
+void cancelTextEditor() {
+  textEditorActive = false;
+  textEditorPurpose = TextEditorPurpose::NONE;
+  textEditorMessage = "";
+  wifiScanListActive = true;
+  restoreByteAfterTextEditor();
+  screenDirty = true;
+}
+
+void appendTextEditorChar(char c) {
+  if (textEditorBuffer.length() >= textEditorMaxLen) {
+    textEditorMessage = "MAX LENGTH";
+    screenDirty = true;
+    return;
+  }
+  textEditorBuffer += c;
+  textEditorMessage = "";
+  screenDirty = true;
+}
+
+void appendCurrentTextEditorChar() {
+  const char* chars = textEditorChars();
+  size_t len = strlen(chars);
+  if (len == 0) return;
+  if (textEditorCharIndex >= len) textEditorCharIndex = 0;
+  appendTextEditorChar(chars[textEditorCharIndex]);
+}
+
+void finishTextEditor() {
+  if (textEditorPurpose == TextEditorPurpose::WIFI_PASSWORD) {
+    if (textEditorBuffer.length() < 8 || textEditorBuffer.length() > 63) {
+      textEditorMessage = "PASSWORD MUST BE 8-63";
+      screenDirty = true;
+      return;
+    }
+
+    if (!wifiMaintSaveCredential(textEditorContext, textEditorBuffer, true)) {
+      textEditorMessage = "SAVE FAILED";
+      screenDirty = true;
+      return;
+    }
+
+    textEditorActive = false;
+    textEditorPurpose = TextEditorPurpose::NONE;
+    wifiScanListActive = false;
+    restoreByteAfterTextEditor();
+    enterMaintenanceMode();
+    return;
+  }
+
+  // PRESET_NAME is intentionally reserved for reuse by the preset editor.
+  textEditorMessage = "EDITOR PURPOSE NOT READY";
+  screenDirty = true;
+}
+
+void handleTextEditorByte(uint8_t logical) {
+  if (logical <= 3) {
+    textEditorGroup = logical;
+    textEditorCharIndex = 0;
+    textEditorMessage = "";
+    updateTextEditorByteLeds();
+    screenDirty = true;
+    return;
+  }
+
+  switch (logical) {
+    case 4:
+      appendTextEditorChar(' ');
+      return;
+    case 5:
+      if (textEditorBuffer.length() > 0) {
+        textEditorBuffer.remove(textEditorBuffer.length() - 1);
+      }
+      textEditorMessage = "";
+      screenDirty = true;
+      return;
+    case 6:
+      cancelTextEditor();
+      return;
+    case 7:
+      finishTextEditor();
+      return;
+  }
+}
+
 void handleBytePress(uint8_t logical) {
+  if (textEditorActive) {
+    handleTextEditorByte(logical);
+    return;
+  }
+
   if (saveDialog) return;
 
   if (!configMode) {
@@ -1781,7 +1953,7 @@ void handleBytePress(uint8_t logical) {
 
 void pollByteButton() {
   if (wifiMaintActive() || systemMenuActive || wifiSelectActive || wifiSetupMenuActive ||
-      wifiDeleteListActive || wifiDeleteConfirm || saveDialog ||
+      wifiScanListActive || wifiDeleteListActive || wifiDeleteConfirm || saveDialog ||
       maintenanceConfirm || systemInfoActive) return;
 
   uint32_t nowMs = millis();
@@ -1795,7 +1967,7 @@ void pollByteButton() {
     //
     // CONFIG:
     //   keep the existing user-facing left->right function layout.
-    uint8_t logical = configMode ? (7 - physical) : physical;
+    uint8_t logical = (textEditorActive || configMode) ? (7 - physical) : physical;
 
     bool raw = byteButton.getSwitchStatus(physical) != 0;
 
@@ -1868,6 +2040,9 @@ void openSystemMenu() {
   saveDialog = false;
   wifiSelectActive = false;
   wifiSetupMenuActive = false;
+  wifiScanListActive = false;
+  textEditorActive = false;
+  textEditorPurpose = TextEditorPurpose::NONE;
   wifiDeleteListActive = false;
   wifiDeleteConfirm = false;
   maintenanceConfirm = false;
@@ -1884,6 +2059,9 @@ void closeSystemMenu() {
   saveDialog = false;
   wifiSelectActive = false;
   wifiSetupMenuActive = false;
+  wifiScanListActive = false;
+  textEditorActive = false;
+  textEditorPurpose = TextEditorPurpose::NONE;
   wifiDeleteListActive = false;
   wifiDeleteConfirm = false;
   maintenanceConfirm = false;
@@ -2004,6 +2182,37 @@ void enterWifiSetupMode() {
   screenDirty = true;
 }
 
+
+void startWifiScanUi() {
+  wifiSetupMenuActive = false;
+  wifiScanListActive = false;
+  textEditorActive = false;
+
+  silenceSynthOnly();
+  clearHeldState();
+  keyboardSustain = false;
+  forceSustain = false;
+
+  // Draw immediately because Wi-Fi scanning is synchronous for a few seconds.
+  M5.Display.fillScreen(C_BLACK);
+  M5.Display.setTextWrap(false);
+  M5.Display.setTextColor(C_YELLOW, C_BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(10, 28);
+  M5.Display.print("SCANNING WIFI...");
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(C_WHITE, C_BLACK);
+  M5.Display.setCursor(10, 62);
+  M5.Display.print("2.4 GHz NETWORKS");
+  M5.Display.setCursor(10, 82);
+  M5.Display.print("PLEASE WAIT");
+
+  wifiScanLastResult = wifiMaintScanNetworks();
+  wifiScanIndex = 0;
+  wifiScanListActive = true;
+  screenDirty = true;
+}
+
 void exitWifiRuntime() {
   if (wifiMaintUpdating()) return;
 
@@ -2106,6 +2315,29 @@ void handleEncoderRotate(int detents) {
     return;
   }
 
+  if (textEditorActive) {
+    const char* chars = textEditorChars();
+    int count = (int)strlen(chars);
+    if (count < 1) count = 1;
+    int next = (int)textEditorCharIndex + detents;
+    while (next < 0) next += count;
+    while (next >= count) next -= count;
+    textEditorCharIndex = (uint8_t)next;
+    textEditorMessage = "";
+    screenDirty = true;
+    return;
+  }
+
+  if (wifiScanListActive) {
+    int optionCount = (int)wifiMaintScanCount() + 3; // RESCAN / MANUAL-AP / BACK
+    int next = (int)wifiScanIndex + detents;
+    while (next < 0) next += optionCount;
+    while (next >= optionCount) next -= optionCount;
+    wifiScanIndex = (uint8_t)next;
+    screenDirty = true;
+    return;
+  }
+
   if (wifiSetupMenuActive) {
     int next = (int)wifiSetupMenuIndex + detents;
     while (next < 0) next += 3;
@@ -2195,9 +2427,6 @@ void handleEncoderRotate(int detents) {
     snprintf(overlayTitle, sizeof(overlayTitle), "BANK SELECT");
     snprintf(overlaySub, sizeof(overlaySub), "BANK %u", browseBank + 1);
     overlayActive = true;
-
-    // v1.8.2: keep the bank-selection screen readable.
-    // Each encoder move refreshes this timer.
     overlayUntil = millis() + 1200;
     screenDirty = true;
   }
@@ -2228,6 +2457,52 @@ void handleEncoderShortPress() {
     }
 
     exitWifiRuntime();
+    return;
+  }
+
+  if (textEditorActive) {
+    appendCurrentTextEditorChar();
+    return;
+  }
+
+  if (wifiScanListActive) {
+    uint8_t count = wifiMaintScanCount();
+
+    if (wifiScanIndex < count) {
+      String ssid = wifiMaintScanSsid(wifiScanIndex);
+
+      // Already-saved profiles keep their existing password when blank is supplied.
+      // Open networks are stored with an empty password.
+      if (wifiMaintScanSaved(wifiScanIndex) || !wifiMaintScanSecured(wifiScanIndex)) {
+        if (wifiMaintSaveCredential(ssid, "", true)) {
+          wifiScanListActive = false;
+          enterMaintenanceMode();
+        } else {
+          wifiScanLastResult = -99;
+          screenDirty = true;
+        }
+        return;
+      }
+
+      beginTextEditor(TextEditorPurpose::WIFI_PASSWORD, ssid, "", 63);
+      return;
+    }
+
+    if (wifiScanIndex == count) {
+      startWifiScanUi();
+      return;
+    }
+
+    if (wifiScanIndex == count + 1) {
+      wifiScanListActive = false;
+      enterWifiSetupMode(); // hidden/manual network browser fallback
+      return;
+    }
+
+    wifiScanListActive = false;
+    wifiSetupMenuActive = true;
+    wifiSetupMenuIndex = 0;
+    screenDirty = true;
     return;
   }
 
@@ -2263,8 +2538,7 @@ void handleEncoderShortPress() {
 
   if (wifiSetupMenuActive) {
     if (wifiSetupMenuIndex == 0) {
-      wifiSetupMenuActive = false;
-      enterWifiSetupMode();
+      startWifiScanUi();
     } else if (wifiSetupMenuIndex == 1) {
       wifiSetupMenuActive = false;
       wifiDeleteListActive = true;
@@ -2348,7 +2622,6 @@ void handleEncoderShortPress() {
     return;
   }
 
-  // Normal-mode short press remains reserved.
   snprintf(overlayTitle, sizeof(overlayTitle),
            configMode ? "CONFIG" : "MENU");
   snprintf(overlaySub, sizeof(overlaySub), "SHORT PRESS RESERVED");
@@ -2360,6 +2633,19 @@ void handleEncoderShortPress() {
 void handleEncoderLongPress() {
   if (wifiMaintActive()) {
     exitWifiRuntime();
+    return;
+  }
+
+  if (textEditorActive) {
+    cancelTextEditor();
+    return;
+  }
+
+  if (wifiScanListActive) {
+    wifiScanListActive = false;
+    wifiSetupMenuActive = true;
+    wifiSetupMenuIndex = 0;
+    screenDirty = true;
     return;
   }
 
@@ -2560,9 +2846,171 @@ void drawWifiSetupMenu() {
 
   M5.Display.setTextColor(C_GREY, C_BLACK);
   M5.Display.setCursor(10, 116);
-  M5.Display.print("ADD = PHONE/AP SETUP");
+  M5.Display.print("ADD = SCAN NEARBY WIFI");
   M5.Display.setCursor(10, 127);
   M5.Display.print("TURN SELECT / PUSH ENTER / HOLD BACK");
+}
+
+
+void drawWifiScanList() {
+  clearScreen();
+  int w = M5.Display.width();
+
+  drawHazardStripe(0, 9);
+  M5.Display.drawRect(5, 14, w - 10, 116, C_AMBER);
+
+  M5.Display.setTextColor(C_YELLOW, C_BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(10, 18);
+  M5.Display.print("WIFI NETWORKS");
+
+  uint8_t count = wifiMaintScanCount();
+  uint8_t optionCount = count + 3;
+  static constexpr uint8_t VISIBLE_ROWS = 6;
+
+  int first = 0;
+  if (wifiScanIndex >= VISIBLE_ROWS) {
+    first = (int)wifiScanIndex - VISIBLE_ROWS + 1;
+  }
+  if (first + VISIBLE_ROWS > optionCount) {
+    first = max(0, (int)optionCount - (int)VISIBLE_ROWS);
+  }
+
+  M5.Display.setTextSize(1);
+  for (uint8_t row = 0; row < VISIBLE_ROWS; ++row) {
+    int option = first + row;
+    if (option >= optionCount) break;
+
+    int y = 42 + row * 13;
+    bool selected = option == wifiScanIndex;
+
+    if (selected) {
+      M5.Display.fillRect(10, y - 2, w - 20, 11, C_YELLOW);
+      M5.Display.setTextColor(C_BLACK, C_YELLOW);
+    } else {
+      M5.Display.setTextColor(C_WHITE, C_BLACK);
+    }
+
+    M5.Display.setCursor(14, y);
+    M5.Display.print(selected ? "> " : "  ");
+
+    if (option < count) {
+      String ssid = wifiMaintScanSsid(option);
+      if (ssid.length() > 23) ssid = ssid.substring(0, 20) + "...";
+      M5.Display.print(ssid);
+
+      if (wifiMaintScanSaved(option)) {
+        M5.Display.setCursor(174, y);
+        M5.Display.print("S");
+      }
+      if (wifiMaintScanSecured(option)) {
+        M5.Display.setCursor(187, y);
+        M5.Display.print("L");
+      }
+
+      int32_t rssi = wifiMaintScanRssi(option);
+      uint8_t bars = (rssi >= -50) ? 4 : (rssi >= -65) ? 3 : (rssi >= -75) ? 2 : 1;
+      for (uint8_t b = 0; b < 4; ++b) {
+        int bh = 2 + b * 2;
+        int bx = 207 + b * 7;
+        int by = y + 7 - bh;
+        uint16_t c = (b < bars)
+                       ? (selected ? C_BLACK : C_GREEN)
+                       : (selected ? C_BLACK : C_GREY);
+        M5.Display.fillRect(bx, by, 4, bh, c);
+      }
+    } else if (option == count) {
+      M5.Display.print("RESCAN");
+    } else if (option == count + 1) {
+      M5.Display.print("MANUAL / PHONE SETUP");
+    } else {
+      M5.Display.print("BACK");
+    }
+  }
+
+  M5.Display.setTextColor(C_GREY, C_BLACK);
+  M5.Display.setCursor(10, 123);
+  if (count == 0) {
+    M5.Display.print(wifiScanLastResult < 0 ? "SCAN ERROR" : "NO 2.4GHz WIFI FOUND");
+  } else {
+    M5.Display.print("S=SAVED L=LOCK  PUSH=SELECT");
+  }
+}
+
+void drawTextEditor() {
+  clearScreen();
+  int w = M5.Display.width();
+
+  M5.Display.drawRect(4, 4, w - 8, 104, C_AMBER);
+  M5.Display.setTextColor(C_YELLOW, C_BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(9, 10);
+  M5.Display.print(textEditorPurpose == TextEditorPurpose::WIFI_PASSWORD
+                     ? "PASSWORD"
+                     : "TEXT EDITOR");
+
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(C_WHITE, C_BLACK);
+  M5.Display.setCursor(9, 34);
+  M5.Display.print("SSID: ");
+  String ctx = textEditorContext;
+  if (ctx.length() > 31) ctx = ctx.substring(0, 28) + "...";
+  M5.Display.print(ctx);
+
+  String mask = "";
+  uint8_t shown = min((size_t)28, textEditorBuffer.length());
+  if (textEditorBuffer.length() > shown) mask = "...";
+  for (uint8_t i = 0; i < shown; ++i) mask += '*';
+
+  M5.Display.setCursor(9, 49);
+  M5.Display.print("VALUE: ");
+  M5.Display.print(mask);
+
+  M5.Display.setCursor(9, 63);
+  M5.Display.printf("LEN %u/%u", (unsigned)textEditorBuffer.length(), textEditorMaxLen);
+  if (textEditorBuffer.length() > 0) {
+    M5.Display.print("  LAST: ");
+    M5.Display.print(textEditorBuffer[textEditorBuffer.length() - 1]);
+  }
+
+  const char* chars = textEditorChars();
+  size_t charCount = strlen(chars);
+  char selectedChar = charCount ? chars[textEditorCharIndex % charCount] : '?';
+  static const char* GROUP_LABELS[4] = {"ABC", "abc", "123", "SYM"};
+
+  M5.Display.setCursor(9, 78);
+  M5.Display.print("CHAR: ");
+  M5.Display.print(selectedChar);
+  M5.Display.print("  [");
+  M5.Display.print(GROUP_LABELS[textEditorGroup]);
+  M5.Display.print("]");
+
+  M5.Display.setCursor(9, 92);
+  if (textEditorMessage.length() > 0) {
+    M5.Display.setTextColor(C_RED, C_BLACK);
+    M5.Display.print(textEditorMessage);
+  } else {
+    M5.Display.setTextColor(C_GREY, C_BLACK);
+    M5.Display.print("TURN=CHAR  PUSH=ADD");
+  }
+
+  // ByteButton legend. Logical order is mapped left -> right while editing.
+  static const char* BYTE_LABELS[8] = {
+    "ABC", "abc", "123", "SYM", "SPC", "DEL", "CAN", "OK"
+  };
+  int cellW = w / 8;
+  for (uint8_t i = 0; i < 8; ++i) {
+    int x = i * cellW;
+    bool groupSelected = (i < 4 && i == textEditorGroup);
+    uint16_t border = groupSelected ? C_YELLOW : C_GREY;
+    uint16_t fill = groupSelected ? C_YELLOW : C_BLACK;
+    uint16_t text = groupSelected ? C_BLACK : C_WHITE;
+    M5.Display.fillRect(x, 111, cellW - 1, 23, fill);
+    M5.Display.drawRect(x, 111, cellW - 1, 23, border);
+    M5.Display.setTextColor(text, fill);
+    M5.Display.setCursor(x + 4, 119);
+    M5.Display.print(BYTE_LABELS[i]);
+  }
 }
 
 void drawWifiDeleteList() {
@@ -2763,7 +3211,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.9.0");
+  M5.Display.print("FW          : v1.9.1");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -2817,7 +3265,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.9.0  LATEST ");
+    M5.Display.print("FW v1.9.1  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -3221,6 +3669,10 @@ void drawUiIfNeeded() {
     drawSystemInfo();
   } else if (usbFlashConfirm) {
     drawUsbFlashConfirm();
+  } else if (textEditorActive) {
+    drawTextEditor();
+  } else if (wifiScanListActive) {
+    drawWifiScanList();
   } else if (wifiDeleteConfirm) {
     drawWifiDeleteConfirm();
   } else if (wifiDeleteListActive) {
@@ -3348,7 +3800,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.0");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.1");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -3394,7 +3846,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.0
+  Version: v1.9.1
   END
   ======================================================================
 */

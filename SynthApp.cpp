@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.1
+  Version: v1.9.2
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -34,7 +34,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.9.1";
+  "DINMETER_FW_VERSION=v1.9.2";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -700,18 +700,35 @@ void applyPedalsAll() {
   }
 }
 
-void applyModeAndGlideAll() {
-  // CC126 = Mono Mode On, CC127 = Poly Mode On
+void applyMonoModeAll() {
+  // SAM2695 supports MIDI mono/poly channel mode directly.
   for (uint8_t i = 0; i < 3; ++i) {
     if (currentPreset.mono) {
-      sendCC(OSC_CH[i], 126, 1);
+      sendCC(OSC_CH[i], 126, 1);  // Mono Mode On
     } else {
-      sendCC(OSC_CH[i], 127, 0);
+      sendCC(OSC_CH[i], 127, 0);  // Poly Mode On
     }
+  }
+}
 
+void applyGlideTimeAll() {
+  // CC5 only. Do not resend mono/poly or portamento switch while the
+  // performer is simply moving the GLIDE TIME knob.
+  for (uint8_t i = 0; i < 3; ++i) {
     sendCC(OSC_CH[i], 5, currentPreset.glideTime);
+  }
+}
+
+void applyPortamentoSwitchAll() {
+  for (uint8_t i = 0; i < 3; ++i) {
     sendCC(OSC_CH[i], 65, currentPreset.glide ? 127 : 0);
   }
+}
+
+void applyModeAndGlideAll() {
+  applyMonoModeAll();
+  applyGlideTimeAll();
+  applyPortamentoSwitchAll();
 }
 
 void applyOscStatic(uint8_t oscIndex) {
@@ -802,7 +819,11 @@ void sendLayeredNote(uint8_t messageType, uint8_t inputNote, uint8_t velocity) {
 void rebuildHeldNotes() {
   currentMonoNote = -1;
 
-  if (currentPreset.mono) {
+  // In MONO + LEGATO, SAM2695 owns mono note priority. Re-send every
+  // physically held NoteOn in its original order so its internal mono stack
+  // is reconstructed correctly. For explicit NON-LEGATO mono, DinMeter keeps
+  // the older single-note retrigger behavior.
+  if (currentPreset.mono && !currentPreset.legato) {
     int16_t n = lastHeldNote();
     if (n >= 0) {
       sendLayeredNote(0x90, (uint8_t)n, heldVelocity[n]);
@@ -815,6 +836,7 @@ void rebuildHeldNotes() {
     uint8_t n = noteOrder[i];
     if (heldInput[n]) {
       sendLayeredNote(0x90, n, heldVelocity[n]);
+      currentMonoNote = n;
     }
   }
 }
@@ -887,6 +909,16 @@ void handleNoteOn(uint8_t note, uint8_t velocity) {
     return;
   }
 
+  if (currentPreset.legato) {
+    // Let SAM2695's native Mono Mode own note priority and portamento.
+    // Crucially, do NOT manufacture an early NoteOff for the previous key.
+    // The real NoteOff will arrive when that physical key is released.
+    sendLayeredNote(0x90, note, velocity);
+    currentMonoNote = note;
+    return;
+  }
+
+  // Explicit NON-LEGATO mono keeps the old hard-retrigger behavior.
   if (currentMonoNote < 0) {
     sendLayeredNote(0x90, note, velocity);
     currentMonoNote = note;
@@ -894,16 +926,8 @@ void handleNoteOn(uint8_t note, uint8_t velocity) {
   }
 
   uint8_t oldNote = (uint8_t)currentMonoNote;
-
-  if (currentPreset.legato) {
-    // New NoteOn first: lets mono synth/portamento behavior do the transition.
-    sendLayeredNote(0x90, note, velocity);
-    sendLayeredNote(0x80, oldNote, 0);
-  } else {
-    sendLayeredNote(0x80, oldNote, 0);
-    sendLayeredNote(0x90, note, velocity);
-  }
-
+  sendLayeredNote(0x80, oldNote, 0);
+  sendLayeredNote(0x90, note, velocity);
   currentMonoNote = note;
 }
 
@@ -911,7 +935,8 @@ void handleNoteOff(uint8_t note, uint8_t velocity) {
   if (!heldInput[note]) {
     if (recoveringFromPanic) return;
 
-    // This is the octave-change/stuck-note protection.
+    // Keep the existing desync safety in this first click-fix pass.
+    // If clicks remain, this hard panic path is the next item to isolate.
     panicAll("NOTE DESYNC");
     return;
   }
@@ -922,6 +947,14 @@ void handleNoteOff(uint8_t note, uint8_t velocity) {
 
   if (!currentPreset.mono) {
     sendLayeredNote(0x80, note, velocity);
+    return;
+  }
+
+  if (currentPreset.legato) {
+    // Match the real keyboard stream. SAM2695 decides which still-held note
+    // becomes active again in native Mono Mode.
+    sendLayeredNote(0x80, note, velocity);
+    currentMonoNote = lastHeldNote();
     return;
   }
 
@@ -936,14 +969,8 @@ void handleNoteOff(uint8_t note, uint8_t velocity) {
     return;
   }
 
-  if (currentPreset.legato) {
-    sendLayeredNote(0x90, (uint8_t)next, heldVelocity[next]);
-    sendLayeredNote(0x80, note, 0);
-  } else {
-    sendLayeredNote(0x80, note, 0);
-    sendLayeredNote(0x90, (uint8_t)next, heldVelocity[next]);
-  }
-
+  sendLayeredNote(0x80, note, 0);
+  sendLayeredNote(0x90, (uint8_t)next, heldVelocity[next]);
   currentMonoNote = next;
 }
 
@@ -1409,7 +1436,7 @@ void applyPerformanceKnob(uint8_t knob, uint8_t v) {
     case 7:
       if (currentPreset.glideTime != v) {
         currentPreset.glideTime = v;
-        applyModeAndGlideAll();
+        applyGlideTimeAll();
         markModified();
       }
       popupNumber("GLIDE TIME", v);
@@ -3211,7 +3238,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.9.1");
+  M5.Display.print("FW          : v1.9.2");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -3265,7 +3292,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.9.1  LATEST ");
+    M5.Display.print("FW v1.9.2  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -3800,7 +3827,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.1");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.2");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -3846,7 +3873,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.1
+  Version: v1.9.2
   END
   ======================================================================
 */

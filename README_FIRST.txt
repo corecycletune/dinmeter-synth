@@ -880,3 +880,17 @@ v1.9.6 UI readability refinement
 - PAGE CHANGE overlay now uses larger white page text (text size 2).
 - PAGE CHANGE overlay remains visible for 500 ms for easier reading while
   rotating the encoder.
+
+
+v1.9.7 live filter + MIDI fixes
+--------------------------------
+- Restored MIDI keyboard CC7 volume. Keyboard volume now scales the DinMeter
+  panel master volume instead of overwriting per-OSC channel balances.
+- Refresh ByteButton LEDs when changing CONFIG pages with the encoder.
+- Added DinMeter-owned real-time TVF cutoff control using SAM2695 Assignable
+  Controller 1 on reserved internal CC16.
+- Static TVF cutoff is held at the neutral center; the current cutoff + per-OSC
+  trim is sent through the live controller so already-sounding voices can
+  respond without a new NoteOn.
+- Resonance still uses the SAM2695 NRPN/TVF parameter path and remains a
+  separate item for real-device verification.

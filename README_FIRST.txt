@@ -693,3 +693,17 @@ USB FLASH remains the final wired recovery path.
 The browser GitHub section shows CURRENT / LATEST / STATUS and provides
 CHECK GITHUB and UPDATE FROM GITHUB buttons. Manual upload remains separate
 and unchanged below it.
+
+
+v1.8.7 multiple Wi-Fi profiles
+------------------------------
+MAINTENANCE can store up to five Wi-Fi SSID/password profiles in ESP32 NVS.
+The existing single saved network is migrated automatically into profile 1.
+
+On MAINTENANCE start, DinMeter scans/tries the saved profiles and connects to
+an available saved network automatically. This supports using home Wi-Fi at
+home and a phone hotspot/tethering network away from home.
+
+The maintenance browser lists saved networks and provides ADD / UPDATE WIFI
+and DELETE controls. Saving one profile no longer forces an immediate reboot,
+so several networks can be registered in one setup session.

@@ -1,13 +1,14 @@
 /*
   ======================================================================
   Module : DinMeter Wi-Fi / OTA Maintenance
-  Version: v1.8.6
+  Version: v1.8.7
   ======================================================================
 */
 
 #include "WifiMaintenance.h"
 
 #include <WiFi.h>
+#include <WiFiMulti.h>
 #include <WebServer.h>
 #include <Update.h>
 #include <ArduinoOTA.h>
@@ -24,8 +25,12 @@ WebServer server(80);
 
 WifiMaintMode runtimeMode = WifiMaintMode::OFF;
 
-String savedSsid;
+static constexpr uint8_t WIFI_PROFILE_MAX = 5;
+String wifiProfileSsid[WIFI_PROFILE_MAX];
+String wifiProfilePass[WIFI_PROFILE_MAX];
+String savedSsid;  // active/compatibility display value
 String savedPass;
+String activeSsid;
 
 bool updating = false;
 int updateProgress = 0;
@@ -58,7 +63,7 @@ String githubAssetDigest = "";
 String githubOtaStatus = "NOT CHECKED";
 size_t githubAssetSize = 0;
 
-static constexpr const char* CURRENT_FW_VERSION = "v1.8.6";
+static constexpr const char* CURRENT_FW_VERSION = "v1.8.7";
 static constexpr const char* GITHUB_LATEST_API =
     "https://api.github.com/repos/corecycletune/dinmeter-synth/releases/latest";
 static constexpr const char* GITHUB_ASSET_NAME = "DinMeter_Synth_firmware.bin";
@@ -66,8 +71,106 @@ static constexpr const char* GITHUB_ASSET_NAME = "DinMeter_Synth_firmware.bin";
 static constexpr const char* PREF_NS = "dmsynth-wifi";
 static constexpr const char* AP_SSID = "DinMeter-Setup";
 static constexpr const char* HOSTNAME = "dinmeter";
-static constexpr uint32_t STA_TIMEOUT_MS = 10000;
+static constexpr uint32_t STA_TIMEOUT_MS = 14000;
 
+
+
+String wifiProfileKey(const char* prefix, uint8_t index) {
+  String key(prefix);
+  key += String(index);
+  return key;
+}
+
+void loadWifiProfiles() {
+  bool any = false;
+  for (uint8_t i = 0; i < WIFI_PROFILE_MAX; ++i) {
+    wifiProfileSsid[i] = wifiPrefs.getString(wifiProfileKey("ssid", i).c_str(), "");
+    wifiProfilePass[i] = wifiPrefs.getString(wifiProfileKey("pass", i).c_str(), "");
+    wifiProfileSsid[i].trim();
+    if (wifiProfileSsid[i].length() > 0) any = true;
+  }
+
+  // One-time migration from the v1.8.6 single-network keys.
+  if (!any) {
+    String legacySsid = wifiPrefs.getString("ssid", "");
+    String legacyPass = wifiPrefs.getString("pass", "");
+    legacySsid.trim();
+    if (legacySsid.length() > 0) {
+      wifiProfileSsid[0] = legacySsid;
+      wifiProfilePass[0] = legacyPass;
+      wifiPrefs.putString("ssid0", legacySsid);
+      wifiPrefs.putString("pass0", legacyPass);
+      any = true;
+    }
+  }
+
+  savedSsid = "";
+  savedPass = "";
+  for (uint8_t i = 0; i < WIFI_PROFILE_MAX; ++i) {
+    if (wifiProfileSsid[i].length() > 0) {
+      savedSsid = wifiProfileSsid[i];
+      savedPass = wifiProfilePass[i];
+      break;
+    }
+  }
+}
+
+uint8_t wifiProfileCount() {
+  uint8_t count = 0;
+  for (uint8_t i = 0; i < WIFI_PROFILE_MAX; ++i) {
+    if (wifiProfileSsid[i].length() > 0) ++count;
+  }
+  return count;
+}
+
+int findWifiProfile(const String& ssid) {
+  for (uint8_t i = 0; i < WIFI_PROFILE_MAX; ++i) {
+    if (wifiProfileSsid[i] == ssid) return (int)i;
+  }
+  return -1;
+}
+
+bool saveWifiProfile(const String& ssid, const String& pass, int& slotOut) {
+  int slot = findWifiProfile(ssid);
+  if (slot < 0) {
+    for (uint8_t i = 0; i < WIFI_PROFILE_MAX; ++i) {
+      if (wifiProfileSsid[i].length() == 0) {
+        slot = (int)i;
+        break;
+      }
+    }
+  }
+  if (slot < 0) return false;
+
+  String finalPass = pass;
+  // Blank password on an existing profile means "keep current password".
+  if (findWifiProfile(ssid) == slot && pass.length() == 0 &&
+      wifiProfileSsid[slot] == ssid && wifiProfilePass[slot].length() > 0) {
+    finalPass = wifiProfilePass[slot];
+  }
+
+  wifiProfileSsid[slot] = ssid;
+  wifiProfilePass[slot] = finalPass;
+  wifiPrefs.putString(wifiProfileKey("ssid", (uint8_t)slot).c_str(), ssid);
+  wifiPrefs.putString(wifiProfileKey("pass", (uint8_t)slot).c_str(), finalPass);
+
+  savedSsid = ssid;
+  savedPass = finalPass;
+  slotOut = slot;
+  return true;
+}
+
+bool deleteWifiProfile(uint8_t slot) {
+  if (slot >= WIFI_PROFILE_MAX || wifiProfileSsid[slot].length() == 0) return false;
+
+  wifiPrefs.remove(wifiProfileKey("ssid", slot).c_str());
+  wifiPrefs.remove(wifiProfileKey("pass", slot).c_str());
+  wifiProfileSsid[slot] = "";
+  wifiProfilePass[slot] = "";
+
+  loadWifiProfiles();
+  return true;
+}
 
 String jsonStringValue(const String& json, const char* key, int from = 0) {
   String token = "\"";
@@ -211,7 +314,7 @@ bool fetchLatestGithubRelease() {
   statusText = "CHECKING GITHUB RELEASE";
 
   WiFiClientSecure client;
-  // v1.8.6 uses GitHub's release SHA-256 digest for payload integrity.
+  // v1.8.7 uses GitHub's release SHA-256 digest for payload integrity.
   // Certificate pinning can be added later without changing the OTA format.
   client.setInsecure();
 
@@ -490,7 +593,7 @@ String pageFooter() {
 
 String rootPage() {
   String h = pageHeader("DinMeter Maintenance");
-  // Keep an exact ASCII firmware marker in the linked image.\n  // Web OTA scans the selected .bin for this before upload.\n  h += F("<!-- DINMETER_FW_VERSION=v1.8.6 -->");
+  // Keep an exact ASCII firmware marker in the linked image.\n  // Web OTA scans the selected .bin for this before upload.\n  h += F("<!-- DINMETER_FW_VERSION=v1.8.7 -->");
 
   h += F("<div class='warn'>DINMETER SYNTH // MAINTENANCE</div><br>");
   h += F("<h2>Status</h2><p>");
@@ -499,12 +602,12 @@ String rootPage() {
   h += htmlEscape(wifiMaintModeText());
   h += F("<br>IP: ");
   h += htmlEscape(wifiMaintIp());
-  h += F("<br>Firmware: v1.8.6");
+  h += F("<br>Firmware: v1.8.7");
   h += F("</p>");
 
   h += F("<hr><h2>GitHub Release Update</h2>");
   h += F("<div class='verbox'>");
-  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='ghCurrent' class='vervalue'>v1.8.6</span></div>");
+  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='ghCurrent' class='vervalue'>v1.8.7</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>LATEST</span><span id='ghLatest' class='vervalue'>--</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>STATUS</span><span id='ghState' class='vervalue'>CHECKING...</span></div>");
   h += F("</div>");
@@ -518,7 +621,7 @@ String rootPage() {
   h += F("<input id='fwFile' type='file' name='firmware' accept='.bin' required>");
   h += F("<button id='fwBtn' type='submit' disabled>SELECT FIRMWARE FIRST</button></form>");
   h += F("<div class='verbox'>");
-  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='currentVersion' class='vervalue'>v1.8.6</span></div>");
+  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='currentVersion' class='vervalue'>v1.8.7</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>SELECTED</span><span id='selectedVersion' class='vervalue'>--</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>ACTION</span><span id='versionAction' class='vervalue'>SELECT FILE</span></div>");
   h += F("</div>");
@@ -540,7 +643,7 @@ String rootPage() {
   h += F("const ghCheckBtn=document.getElementById('ghCheckBtn');");
   h += F("const ghUpdateBtn=document.getElementById('ghUpdateBtn');");
   h += F("const ghStatus=document.getElementById('ghStatus');");
-  h += F("const CURRENT_VERSION='v1.8.6';");
+  h += F("const CURRENT_VERSION='v1.8.7';");
   h += F("let rebootMode=false;");
   h += F("let detectedVersion='';");
   h += F("let versionRelation='unknown';");
@@ -743,14 +846,34 @@ String rootPage() {
   h += F("});");
   h += F("</script>");
 
-  h += F("<hr><h2>Wi-Fi Setup</h2>");
+  h += F("<hr><h2>Wi-Fi Profiles</h2>");
+  h += F("<p class='muted'>Up to 5 networks are stored in ESP32 NVS. MAINTENANCE automatically connects to the strongest saved network it can reach.</p>");
+  h += F("<div class='verbox'>");
+  if (wifiProfileCount() == 0) {
+    h += F("<div class='muted'>NO SAVED NETWORKS</div>");
+  } else {
+    for (uint8_t i = 0; i < WIFI_PROFILE_MAX; ++i) {
+      if (wifiProfileSsid[i].length() == 0) continue;
+      h += F("<div class='verrow'><span class='verlabel'>");
+      h += (activeSsid == wifiProfileSsid[i]) ? F("ACTIVE") : F("SAVED");
+      h += F("</span><span class='vervalue'>");
+      h += htmlEscape(wifiProfileSsid[i]);
+      h += F("</span></div>");
+      h += F("<form method='POST' action='/deletewifi' onsubmit=\"return confirm('Delete this Wi-Fi profile?')\">");
+      h += F("<input type='hidden' name='slot' value='");
+      h += String(i);
+      h += F("'><button type='submit'>DELETE ");
+      h += htmlEscape(wifiProfileSsid[i]);
+      h += F("</button></form>");
+    }
+  }
+  h += F("</div>");
+
   h += F("<form method='POST' action='/savewifi'>");
-  h += F("<label>SSID</label><input name='ssid' type='text' value='");
-  h += htmlEscape(savedSsid);
-  h += F("' required>");
+  h += F("<label>SSID</label><input name='ssid' type='text' required>");
   h += F("<label>Password</label><input name='pass' type='password' value=''>");
-  h += F("<button type='submit'>SAVE WIFI</button></form>");
-  h += F("<p class='muted'>Credentials are stored in ESP32 NVS, not in the sketch source.</p>");
+  h += F("<button type='submit'>ADD / UPDATE WIFI</button></form>");
+  h += F("<p class='muted'>For an existing SSID, leave Password blank to keep the saved password. New blank-password profiles are treated as open networks.</p>");
 
   h += F("<hr><p class='muted'>Arduino IDE OTA hostname: <b>dinmeter</b><br>");
   h += F("Browser address on home Wi-Fi: <b>http://dinmeter.local/</b><br>");
@@ -805,11 +928,11 @@ void registerWebRoutes() {
   server.on("/health", HTTP_GET, []() {
     server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json; charset=utf-8",
-                "{\"ok\":true,\"version\":\"v1.8.6\"}");
+                "{\"ok\":true,\"version\":\"v1.8.7\"}");
   });
 
   server.on("/github-status", HTTP_GET, []() {
-    String j = "{\"current\":\"v1.8.6\",\"latest\":\"";
+    String j = "{\"current\":\"v1.8.7\",\"latest\":\"";
     j += jsonEscape(githubLatestVersion.length() ? githubLatestVersion : String("--"));
     j += "\",\"status\":\"";
     j += jsonEscape(githubOtaStatus);
@@ -1102,24 +1225,50 @@ void registerWebRoutes() {
     String pass = server.arg("pass");
     ssid.trim();
 
-    if (ssid.length() == 0 || ssid.length() > 64 || pass.length() > 64) {
+    if (ssid.length() == 0 || ssid.length() > 32 || pass.length() > 63) {
       server.send(400, "text/plain; charset=utf-8", "Invalid SSID/password.");
       return;
     }
 
-    wifiPrefs.putString("ssid", ssid);
-    wifiPrefs.putString("pass", pass);
-    savedSsid = ssid;
-    savedPass = pass;
+    int slot = -1;
+    if (!saveWifiProfile(ssid, pass, slot)) {
+      server.send(409, "text/plain; charset=utf-8",
+                  "Wi-Fi profile list is full. Delete a saved network first.");
+      return;
+    }
 
     String h = pageHeader("Wi-Fi Saved");
-    h += F("<div class='warn'>WIFI SAVED</div><br>");
-    h += F("<p class='ok'>SSID/password saved to NVS.</p>");
-    h += F("<p>The Din Meter will reboot into normal mode in about 2 seconds.</p>");
+    h += F("<div class='warn'>WIFI PROFILE SAVED</div><br>");
+    h += F("<p class='ok'>Saved network: <b>");
+    h += htmlEscape(ssid);
+    h += F("</b></p><p>Stored in profile slot ");
+    h += String(slot + 1);
+    h += F(" of ");
+    h += String(WIFI_PROFILE_MAX);
+    h += F(".</p>");
+    h += F("<p>You can add another network now, or return to MAINTENANCE.</p>");
+    h += F("<p><a href='/' style='color:#f6b900'>BACK TO MAINTENANCE</a></p>");
     h += pageFooter();
 
+    server.sendHeader("Cache-Control", "no-store");
     server.send(200, "text/html; charset=utf-8", h);
-    restartAt = millis() + 2000;
+  });
+
+  server.on("/deletewifi", HTTP_POST, []() {
+    if (!server.hasArg("slot")) {
+      server.send(400, "text/plain; charset=utf-8", "Missing profile slot.");
+      return;
+    }
+
+    int slot = server.arg("slot").toInt();
+    if (slot < 0 || slot >= WIFI_PROFILE_MAX || !deleteWifiProfile((uint8_t)slot)) {
+      server.send(404, "text/plain; charset=utf-8", "Wi-Fi profile not found.");
+      return;
+    }
+
+    server.sendHeader("Location", "/");
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(303, "text/plain", "");
   });
 
   server.onNotFound([]() {
@@ -1153,8 +1302,8 @@ void startAccessPoint(WifiMaintMode mode) {
 
 void wifiMaintInit() {
   wifiPrefs.begin(PREF_NS, false);
-  savedSsid = wifiPrefs.getString("ssid", "");
-  savedPass = wifiPrefs.getString("pass", "");
+  loadWifiProfiles();
+  activeSsid = "";
 
   WiFi.mode(WIFI_OFF);
   runtimeMode = WifiMaintMode::OFF;
@@ -1163,11 +1312,10 @@ void wifiMaintInit() {
 
 void wifiMaintStartMaintenance() {
   wifiMaintStop();
+  loadWifiProfiles();
+  activeSsid = "";
 
-  savedSsid = wifiPrefs.getString("ssid", "");
-  savedPass = wifiPrefs.getString("pass", "");
-
-  if (savedSsid.length() == 0) {
+  if (wifiProfileCount() == 0) {
     startAccessPoint(WifiMaintMode::MAINT_AP);
     return;
   }
@@ -1176,18 +1324,32 @@ void wifiMaintStartMaintenance() {
   WiFi.setSleep(false);
   WiFi.setHostname(HOSTNAME);
 
-  statusText = "CONNECTING " + savedSsid;
-  WiFi.begin(savedSsid.c_str(), savedPass.c_str());
+  statusText = "SEARCHING SAVED WIFI";
+
+  WiFiMulti wifiMulti;
+  wifiMulti.setStrictMode(true);
+  for (uint8_t i = 0; i < WIFI_PROFILE_MAX; ++i) {
+    if (wifiProfileSsid[i].length() == 0) continue;
+    wifiMulti.addAP(wifiProfileSsid[i].c_str(),
+                    wifiProfilePass[i].length() ? wifiProfilePass[i].c_str() : nullptr);
+  }
 
   uint32_t started = millis();
   while (WiFi.status() != WL_CONNECTED &&
          millis() - started < STA_TIMEOUT_MS) {
+    wifiMulti.run(3500, false);
+    if (WiFi.status() == WL_CONNECTED) break;
     delay(50);
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    activeSsid = WiFi.SSID();
+    savedSsid = activeSsid;
+    int profile = findWifiProfile(activeSsid);
+    savedPass = (profile >= 0) ? wifiProfilePass[profile] : String("");
+
     runtimeMode = WifiMaintMode::MAINT_STA;
-    statusText = "OTA READY";
+    statusText = "OTA READY " + activeSsid;
     registerWebRoutes();
     startMdnsAndOta();
     githubOtaState = GithubOtaState::CHECK_QUEUED;
@@ -1264,7 +1426,7 @@ bool wifiMaintUpdating() {
 }
 
 bool wifiMaintHasCredentials() {
-  return savedSsid.length() > 0;
+  return wifiProfileCount() > 0;
 }
 
 bool wifiMaintStaConnected() {
@@ -1297,7 +1459,9 @@ String wifiMaintModeText() {
 }
 
 String wifiMaintSavedSsid() {
-  return savedSsid;
+  if (activeSsid.length() > 0) return activeSsid;
+  if (savedSsid.length() > 0) return savedSsid;
+  return "-";
 }
 
 int wifiMaintProgress() {
@@ -1357,7 +1521,7 @@ String wifiMaintGithubStatus() {
 /*
   ======================================================================
   Module : DinMeter Wi-Fi / OTA Maintenance
-  Version: v1.8.6
+  Version: v1.8.7
   END
   ======================================================================
 */

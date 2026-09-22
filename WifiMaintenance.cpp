@@ -173,12 +173,12 @@ int compareVersions(const String& aIn, const String& bIn) {
 }
 
 String sha256Hex(const uint8_t digest[32]) {
-  static const char HEX[] = "0123456789abcdef";
+  static const char HEX_DIGITS[] = "0123456789abcdef";
   String out;
   out.reserve(64);
   for (int i = 0; i < 32; ++i) {
-    out += HEX[(digest[i] >> 4) & 0x0F];
-    out += HEX[digest[i] & 0x0F];
+    out += HEX_DIGITS[(digest[i] >> 4) & 0x0F];
+    out += HEX_DIGITS[digest[i] & 0x0F];
   }
   return out;
 }

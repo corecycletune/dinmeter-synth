@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.6
+  Version: v1.9.7
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -34,7 +34,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.9.6";
+  "DINMETER_FW_VERSION=v1.9.7";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -184,6 +184,7 @@ uint8_t loadedSlot  = 0;  // 0..7
 bool modified       = false;
 
 uint8_t masterVolume = 100;
+uint8_t keyboardVolume = 127;  // incoming MIDI CC7, multiplied with panel master
 
 // Runtime-only states
 bool keyboardSustain = false;
@@ -459,6 +460,54 @@ void sendMidi3(uint8_t b1, uint8_t b2, uint8_t b3) {
 
 void sendCC(uint8_t ch, uint8_t cc, uint8_t value) {
   sendMidi3(0xB0 | (ch & 0x0F), cc & 0x7F, value & 0x7F);
+}
+
+static constexpr uint8_t LIVE_FILTER_CC = 16;  // reserved inside DinMeter
+
+uint8_t effectiveMasterVolume() {
+  return (uint8_t)(((uint16_t)masterVolume * (uint16_t)keyboardVolume + 63) / 127);
+}
+
+void applyMasterVolume() {
+  synth.setMasterVolume(effectiveMasterVolume());
+}
+
+void sendGsPartParameter(uint8_t ch, uint8_t addressBlock, uint8_t parameter, uint8_t value) {
+  // SAM2695 GS DT1 style message. The final xx byte is documented as
+  // don't-care by DREAM, so 0x00 is sufficient (same approach as M5 library).
+  const uint8_t msg[11] = {
+    0xF0, 0x41, 0x00, 0x42, 0x12, 0x40,
+    (uint8_t)(addressBlock | (ch & 0x0F)),
+    parameter,
+    (uint8_t)(value & 0x7F),
+    0x00,
+    0xF7
+  };
+  SynthSerial.write(msg, sizeof(msg));
+}
+
+void configureLiveCutoffController(uint8_t ch) {
+  // Assign CC16 as SAM2695 Assignable Controller 1 for this part.
+  sendGsPartParameter(ch, 0x10, 0x1F, LIVE_FILTER_CC);
+
+  // Keep every CC1 side effect neutral except TVF cutoff.
+  sendGsPartParameter(ch, 0x20, 0x40, 0x40); // pitch: neutral
+  sendGsPartParameter(ch, 0x20, 0x41, 0x7F); // TVF cutoff: full positive range
+  sendGsPartParameter(ch, 0x20, 0x42, 0x40); // amplitude: neutral
+  sendGsPartParameter(ch, 0x20, 0x44, 0x00); // LFO pitch depth: off
+  sendGsPartParameter(ch, 0x20, 0x45, 0x00); // LFO TVF depth: off
+  sendGsPartParameter(ch, 0x20, 0x46, 0x00); // LFO TVA depth: off
+}
+
+void sendLiveCutoff(uint8_t oscIndex) {
+  if (oscIndex >= 3) return;
+  sendCC(OSC_CH[oscIndex], LIVE_FILTER_CC, oscEffectiveCutoff(oscIndex));
+}
+
+void sendLiveCutoffAll() {
+  for (uint8_t i = 0; i < 3; ++i) {
+    sendLiveCutoff(i);
+  }
 }
 
 void sendProgram(uint8_t ch, uint8_t program) {
@@ -761,9 +810,12 @@ void persistLocation() {
 // ======================================================================
 
 void applyFilterAll() {
+  // Keep static TVF cutoff centered. The actual cutoff position is driven by
+  // the assignable live controller, which also affects already-sounding voices.
   for (uint8_t i = 0; i < 3; ++i) {
-    synth.setTvf(OSC_CH[i], oscEffectiveCutoff(i), oscEffectiveRes(i));
+    synth.setTvf(OSC_CH[i], 64, oscEffectiveRes(i));
   }
+  sendLiveCutoffAll();
 }
 
 void applyEnvelopeAll() {
@@ -873,6 +925,8 @@ void applyOscStatic(uint8_t oscIndex) {
   sendCC(ch, 32, 0);
   sendProgram(ch, o.program);
   delay(2);
+
+  configureLiveCutoffController(ch);
 
   setPitchBendRange(ch, softwareMonoVoiceActive() ? SOFTWARE_GLIDE_BEND_RANGE : 2);
   synth.setTuning(ch, fineTuneValueFromCents(o.detune), 64);
@@ -1008,7 +1062,7 @@ void applyCurrentPresetToSynth(bool rebuildNotes = true) {
     applyOscStatic(i);
   }
 
-  synth.setMasterVolume(masterVolume);
+  applyMasterVolume();
 
   applyFilterAll();
   applyEnvelopeAll();
@@ -1246,8 +1300,17 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
       return;
     }
 
-    // Keyboard Program/Bank/volume/our internal FX/glide settings are blocked.
-    if (cc == 0 || cc == 32 || cc == 7 || cc == 5 || cc == 65 ||
+    if (cc == 7) {
+      // Preserve the DinMeter panel volume as the local master, while allowing
+      // the keyboard's volume control to scale the final output.
+      keyboardVolume = value;
+      applyMasterVolume();
+      return;
+    }
+
+    // Keyboard Program/Bank/our internal FX/glide settings are blocked.
+    // CC16 is reserved internally for live TVF cutoff control.
+    if (cc == 0 || cc == 32 || cc == 5 || cc == 65 || cc == LIVE_FILTER_CC ||
         cc == 81 || cc == 91 || cc == 93 || cc == 126 || cc == 127) {
       return;
     }
@@ -1581,14 +1644,14 @@ void applyPerformanceKnob(uint8_t knob, uint8_t v) {
   switch (knob) {
     case 0:
       masterVolume = v;
-      synth.setMasterVolume(masterVolume);
+      applyMasterVolume();
       popupNumber("VOLUME", masterVolume);
       return;
 
     case 1:
       if (currentPreset.cutoff != v) {
         currentPreset.cutoff = v;
-        applyFilterAll();
+        sendLiveCutoffAll();
         markModified();
       }
       popupNumber("CUTOFF", v);
@@ -1653,7 +1716,7 @@ void applyFilterPageKnob(uint8_t knob, uint8_t v) {
     case 0:
       changed = currentPreset.cutoff != v;
       currentPreset.cutoff = v;
-      if (changed) applyFilterAll();
+      if (changed) sendLiveCutoffAll();
       break;
     case 1:
       changed = currentPreset.resonance != v;
@@ -1749,7 +1812,7 @@ void applyOscPageKnob(uint8_t page, uint8_t knob, uint8_t v) {
       int8_t trim = (int8_t)map127ToSigned(v, -63, 63);
       if (o.cutoffTrim != trim) {
         o.cutoffTrim = trim;
-        applyFilterAll();
+        sendLiveCutoff(oi);
         changed = true;
       }
       break;
@@ -2641,6 +2704,7 @@ void handleEncoderRotate(int detents) {
     if ((uint8_t)p != configPage) {
       configPage = (uint8_t)p;
       armPickupForCurrentContext();
+      updateByteLeds();
       showPageOverlay();
     }
     return;
@@ -3457,7 +3521,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.9.6");
+  M5.Display.print("FW          : v1.9.7");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -3511,7 +3575,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.9.6  LATEST ");
+    M5.Display.print("FW v1.9.7  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -4052,7 +4116,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.6");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.7");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -4102,7 +4166,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.6
+  Version: v1.9.7
   END
   ======================================================================
 */

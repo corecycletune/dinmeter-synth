@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Wi-Fi / OTA Maintenance
-  Version: v1.8.9
+  Version: v1.9.0
   ======================================================================
 */
 
@@ -31,6 +31,8 @@ String wifiProfilePass[WIFI_PROFILE_MAX];
 String savedSsid;  // active/compatibility display value
 String savedPass;
 String activeSsid;
+String lastWifiFailureSsid;
+String lastWifiFailureText;
 int preferredProfile = -1;       // -1 = automatic selection
 int pendingSwitchProfile = -1;   // scheduled after HTTP response is sent
 uint32_t wifiSwitchAt = 0;
@@ -66,7 +68,7 @@ String githubAssetDigest = "";
 String githubOtaStatus = "NOT CHECKED";
 size_t githubAssetSize = 0;
 
-static constexpr const char* CURRENT_FW_VERSION = "v1.8.9";
+static constexpr const char* CURRENT_FW_VERSION = "v1.9.0";
 static constexpr const char* GITHUB_LATEST_API =
     "https://api.github.com/repos/corecycletune/dinmeter-synth/releases/latest";
 static constexpr const char* GITHUB_ASSET_NAME = "DinMeter_Synth_firmware.bin";
@@ -185,6 +187,57 @@ bool deleteWifiProfile(uint8_t slot) {
 
   loadWifiProfiles();
   return true;
+}
+
+
+String compactWifiFailureFromStatus(int status) {
+  switch (status) {
+    case WL_NO_SSID_AVAIL: return "SSID NOT FOUND";
+    case WL_CONNECT_FAILED: return "AUTH/CONNECT FAILED";
+    case WL_CONNECTION_LOST: return "CONNECTION LOST";
+    case WL_DISCONNECTED: return "DISCONNECTED";
+    default: return "CONNECT TIMEOUT";
+  }
+}
+
+bool wifiSsidVisible(const String& target) {
+  int count = WiFi.scanNetworks();
+  bool found = false;
+  if (count > 0) {
+    for (int i = 0; i < count; ++i) {
+      if (WiFi.SSID(i) == target) {
+        found = true;
+        break;
+      }
+    }
+  }
+  WiFi.scanDelete();
+  return found;
+}
+
+void recordSpecificWifiFailure(const String& ssid, int status) {
+  lastWifiFailureSsid = ssid;
+
+  if (!wifiSsidVisible(ssid)) {
+    lastWifiFailureText = "SSID NOT FOUND / CHECK 2.4GHz";
+    return;
+  }
+
+  if (status == WL_CONNECT_FAILED) {
+    lastWifiFailureText = "AUTH FAILED / CHECK PASSWORD";
+    return;
+  }
+
+  lastWifiFailureText = compactWifiFailureFromStatus(status);
+  if (lastWifiFailureText == "DISCONNECTED" ||
+      lastWifiFailureText == "CONNECT TIMEOUT") {
+    lastWifiFailureText = "AP FOUND / CHECK PASSWORD OR SECURITY";
+  }
+}
+
+void recordAutoWifiFailure() {
+  lastWifiFailureSsid = "AUTO";
+  lastWifiFailureText = "NO SAVED WIFI CONNECTED";
 }
 
 String jsonStringValue(const String& json, const char* key, int from = 0) {
@@ -329,7 +382,7 @@ bool fetchLatestGithubRelease() {
   statusText = "CHECKING GITHUB RELEASE";
 
   WiFiClientSecure client;
-  // v1.8.9 uses GitHub's release SHA-256 digest for payload integrity.
+  // v1.9.0 uses GitHub's release SHA-256 digest for payload integrity.
   // Certificate pinning can be added later without changing the OTA format.
   client.setInsecure();
 
@@ -608,7 +661,7 @@ String pageFooter() {
 
 String rootPage() {
   String h = pageHeader("DinMeter Maintenance");
-  // Keep an exact ASCII firmware marker in the linked image.\n  // Web OTA scans the selected .bin for this before upload.\n  h += F("<!-- DINMETER_FW_VERSION=v1.8.9 -->");
+  // Keep an exact ASCII firmware marker in the linked image.\n  // Web OTA scans the selected .bin for this before upload.\n  h += F("<!-- DINMETER_FW_VERSION=v1.9.0 -->");
 
   h += F("<div class='warn'>DINMETER SYNTH // MAINTENANCE</div><br>");
   h += F("<h2>Status</h2><p>");
@@ -617,12 +670,19 @@ String rootPage() {
   h += htmlEscape(wifiMaintModeText());
   h += F("<br>IP: ");
   h += htmlEscape(wifiMaintIp());
-  h += F("<br>Firmware: v1.8.9");
+  h += F("<br>Firmware: v1.9.0");
+  if (lastWifiFailureText.length() > 0) {
+    h += F("<br><span class='bad'>Last Wi-Fi failure: ");
+    h += htmlEscape(lastWifiFailureSsid);
+    h += F(" / ");
+    h += htmlEscape(lastWifiFailureText);
+    h += F("</span>");
+  }
   h += F("</p>");
 
   h += F("<hr><h2>GitHub Release Update</h2>");
   h += F("<div class='verbox'>");
-  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='ghCurrent' class='vervalue'>v1.8.9</span></div>");
+  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='ghCurrent' class='vervalue'>v1.9.0</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>LATEST</span><span id='ghLatest' class='vervalue'>--</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>STATUS</span><span id='ghState' class='vervalue'>CHECKING...</span></div>");
   h += F("</div>");
@@ -636,7 +696,7 @@ String rootPage() {
   h += F("<input id='fwFile' type='file' name='firmware' accept='.bin' required>");
   h += F("<button id='fwBtn' type='submit' disabled>SELECT FIRMWARE FIRST</button></form>");
   h += F("<div class='verbox'>");
-  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='currentVersion' class='vervalue'>v1.8.9</span></div>");
+  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='currentVersion' class='vervalue'>v1.9.0</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>SELECTED</span><span id='selectedVersion' class='vervalue'>--</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>ACTION</span><span id='versionAction' class='vervalue'>SELECT FILE</span></div>");
   h += F("</div>");
@@ -658,7 +718,7 @@ String rootPage() {
   h += F("const ghCheckBtn=document.getElementById('ghCheckBtn');");
   h += F("const ghUpdateBtn=document.getElementById('ghUpdateBtn');");
   h += F("const ghStatus=document.getElementById('ghStatus');");
-  h += F("const CURRENT_VERSION='v1.8.9';");
+  h += F("const CURRENT_VERSION='v1.9.0';");
   h += F("let rebootMode=false;");
   h += F("let detectedVersion='';");
   h += F("let versionRelation='unknown';");
@@ -982,11 +1042,11 @@ void registerWebRoutes() {
   server.on("/health", HTTP_GET, []() {
     server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json; charset=utf-8",
-                "{\"ok\":true,\"version\":\"v1.8.9\"}");
+                "{\"ok\":true,\"version\":\"v1.9.0\"}");
   });
 
   server.on("/github-status", HTTP_GET, []() {
-    String j = "{\"current\":\"v1.8.9\",\"latest\":\"";
+    String j = "{\"current\":\"v1.9.0\",\"latest\":\"";
     j += jsonEscape(githubLatestVersion.length() ? githubLatestVersion : String("--"));
     j += "\",\"status\":\"";
     j += jsonEscape(githubOtaStatus);
@@ -1394,9 +1454,13 @@ void startAccessPoint(WifiMaintMode mode) {
   delay(150);
 
   runtimeMode = mode;
-  statusText = (mode == WifiMaintMode::SETUP_AP)
-                 ? "WIFI SETUP READY"
-                 : "HOME WIFI FAILED - AP FALLBACK";
+  if (mode == WifiMaintMode::SETUP_AP) {
+    statusText = "WIFI SETUP READY";
+  } else if (lastWifiFailureText.length() > 0) {
+    statusText = "FALLBACK - " + lastWifiFailureText;
+  } else {
+    statusText = "HOME WIFI FAILED - AP FALLBACK";
+  }
 
   registerWebRoutes();
   startMdnsAndOta();
@@ -1405,21 +1469,30 @@ void startAccessPoint(WifiMaintMode mode) {
 bool connectSpecificProfile(uint8_t slot, uint32_t timeoutMs) {
   if (slot >= WIFI_PROFILE_MAX || wifiProfileSsid[slot].length() == 0) return false;
 
-  statusText = "CONNECTING " + wifiProfileSsid[slot];
+  String targetSsid = wifiProfileSsid[slot];
+  statusText = "CONNECTING " + targetSsid;
   WiFi.disconnect(false, false);
   delay(120);
 
   const char* pass = wifiProfilePass[slot].length() ? wifiProfilePass[slot].c_str() : nullptr;
-  WiFi.begin(wifiProfileSsid[slot].c_str(), pass);
+  WiFi.begin(targetSsid.c_str(), pass);
 
   uint32_t started = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - started < timeoutMs) {
     delay(50);
   }
-  return WiFi.status() == WL_CONNECTED;
+
+  if (WiFi.status() == WL_CONNECTED) {
+    return true;
+  }
+
+  int failedStatus = (int)WiFi.status();
+  recordSpecificWifiFailure(targetSsid, failedStatus);
+  statusText = "FAILED " + targetSsid + " - " + lastWifiFailureText;
+  return false;
 }
 
-bool connectAutoProfiles(uint32_t timeoutMs) {
+bool connectAutoProfiles(uint32_t timeoutMs, bool preserveFailure = false) {
   WiFi.disconnect(false, false);
   delay(120);
 
@@ -1438,7 +1511,14 @@ bool connectAutoProfiles(uint32_t timeoutMs) {
     if (WiFi.status() == WL_CONNECTED) break;
     delay(50);
   }
-  return WiFi.status() == WL_CONNECTED;
+
+  if (WiFi.status() == WL_CONNECTED) return true;
+
+  if (!preserveFailure) {
+    recordAutoWifiFailure();
+    statusText = "AUTO WIFI FAILED";
+  }
+  return false;
 }
 
 void finalizeStaConnection() {
@@ -1473,7 +1553,7 @@ void performScheduledWifiSwitch() {
     connected = connectSpecificProfile((uint8_t)target, 9000);
     if (!connected) {
       statusText = "TARGET FAILED - AUTO FALLBACK";
-      connected = connectAutoProfiles(STA_TIMEOUT_MS);
+      connected = connectAutoProfiles(STA_TIMEOUT_MS, true);
     }
   } else {
     connected = connectAutoProfiles(STA_TIMEOUT_MS);
@@ -1495,6 +1575,8 @@ void wifiMaintInit() {
   wifiPrefs.begin(PREF_NS, false);
   loadWifiProfiles();
   activeSsid = "";
+  lastWifiFailureSsid = "";
+  lastWifiFailureText = "";
 
   WiFi.mode(WIFI_OFF);
   runtimeMode = WifiMaintMode::OFF;
@@ -1516,14 +1598,16 @@ void wifiMaintStartMaintenance() {
   WiFi.setHostname(HOSTNAME);
 
   bool connected = false;
+  bool preferredFailed = false;
 
   if (preferredProfile >= 0 && preferredProfile < WIFI_PROFILE_MAX &&
       wifiProfileSsid[preferredProfile].length() > 0) {
     connected = connectSpecificProfile((uint8_t)preferredProfile, 9000);
+    preferredFailed = !connected;
   }
 
   if (!connected) {
-    connected = connectAutoProfiles(STA_TIMEOUT_MS);
+    connected = connectAutoProfiles(STA_TIMEOUT_MS, preferredFailed);
   }
 
   if (connected) {
@@ -1702,6 +1786,26 @@ bool wifiMaintSelectProfile(int ordinal) {
   return false;
 }
 
+bool wifiMaintDeleteProfile(uint8_t ordinal) {
+  uint8_t seen = 0;
+  for (uint8_t slot = 0; slot < WIFI_PROFILE_MAX; ++slot) {
+    if (wifiProfileSsid[slot].length() == 0) continue;
+    if (seen == ordinal) {
+      return deleteWifiProfile(slot);
+    }
+    ++seen;
+  }
+  return false;
+}
+
+String wifiMaintLastFailureSsid() {
+  return lastWifiFailureSsid;
+}
+
+String wifiMaintLastFailure() {
+  return lastWifiFailureText;
+}
+
 void wifiMaintCheckLatestRelease() {
   if (runtimeMode != WifiMaintMode::MAINT_STA ||
       WiFi.status() != WL_CONNECTED || updating) {
@@ -1751,7 +1855,7 @@ String wifiMaintGithubStatus() {
 /*
   ======================================================================
   Module : DinMeter Wi-Fi / OTA Maintenance
-  Version: v1.8.9
+  Version: v1.9.0
   END
   ======================================================================
 */

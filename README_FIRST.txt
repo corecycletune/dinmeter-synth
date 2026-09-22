@@ -742,3 +742,25 @@ automatic saved-network selection. Holding the encoder returns to SYSTEM MENU.
 
 This closes the gap in v1.8.8, where manual profile switching existed only in
 the maintenance browser UI.
+
+
+v1.9.0 Wi-Fi diagnostics and physical setup management
+-------------------------------------------------------
+Connection failures now keep a diagnostic result. For a selected profile,
+DinMeter distinguishes cases such as:
+- SSID not found / likely 2.4 GHz visibility issue
+- AP found but password/security should be checked
+- authentication/connect failure
+- no saved Wi-Fi could connect
+
+When MAINTENANCE falls back to DinMeter-Setup AP, the physical display shows
+the failed SSID and the latest failure reason. The maintenance browser also
+shows the latest Wi-Fi failure.
+
+SYSTEM MENU -> WIFI SETUP is now a physical management submenu:
+- ADD NETWORK: starts the existing DinMeter-Setup AP/browser setup flow
+- DELETE NETWORK: lists saved profiles and requires a YES/NO confirmation
+- BACK
+
+Password entry remains in the phone/PC browser because entering arbitrary Wi-Fi
+passwords with one encoder would be unnecessarily difficult.

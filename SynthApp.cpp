@@ -2956,15 +2956,10 @@ void drawHazardStripe(int y, int h, int x0, int width) {
 
   M5.Display.fillRect(x0, y, width, h, C_YELLOW);
   int xEnd = x0 + width;
-  for (int x = x0 - h; x < xEnd + h; x += 14) {
-    int x1 = max(x, x0);
-    int x2 = min(x + h, xEnd - 1);
-    if (x2 < x0 || x1 >= xEnd) continue;
-
-    // Clip only the stripe's horizontal range; vertical coordinates are unchanged.
-    M5.Display.drawLine(x, y + h - 1, x + h, y, C_BLACK);
-    M5.Display.drawLine(x + 1, y + h - 1, x + h + 1, y, C_BLACK);
-    M5.Display.drawLine(x + 2, y + h - 1, x + h + 2, y, C_BLACK);
+  for (int x = x0; x < xEnd; x += 14) {
+    M5.Display.drawLine(x, y + h - 1, min(x + h, xEnd - 1), y, C_BLACK);
+    M5.Display.drawLine(x + 1, y + h - 1, min(x + h + 1, xEnd - 1), y, C_BLACK);
+    M5.Display.drawLine(x + 2, y + h - 1, min(x + h + 2, xEnd - 1), y, C_BLACK);
   }
 }
 

@@ -493,7 +493,7 @@ bool softwarePortamentoActive() {
 void sendSoftwareBendAll(int bend) {
   bend = constrain(bend, 0, 16383);
   for (uint8_t i = 0; i < 3; ++i) {
-    if (oscEnabled(i)) {
+    if (currentPreset.osc[i].level > 0) {
       sendPitchBend14(OSC_CH[i], bend);
     }
   }
@@ -1250,7 +1250,7 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
     // Software portamento owns Pitch Bend while a legato phrase is active.
     // Combining wheel bend with glide can be added later; for now avoid the
     // two controllers fighting over the same 14-bit bend value.
-    if (softwarePortamentoActive() && monoAnchorNote >= 0) return;
+    if (softwarePortamentoActive()) return;
 
     for (uint8_t i = 0; i < 3; ++i) {
       sendPitchBendRaw(OSC_CH[i], packet[2], packet[3]);

@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Wi-Fi / OTA Maintenance
-  Version: v1.8.8
+  Version: v1.8.9
   ======================================================================
 */
 
@@ -66,7 +66,7 @@ String githubAssetDigest = "";
 String githubOtaStatus = "NOT CHECKED";
 size_t githubAssetSize = 0;
 
-static constexpr const char* CURRENT_FW_VERSION = "v1.8.8";
+static constexpr const char* CURRENT_FW_VERSION = "v1.8.9";
 static constexpr const char* GITHUB_LATEST_API =
     "https://api.github.com/repos/corecycletune/dinmeter-synth/releases/latest";
 static constexpr const char* GITHUB_ASSET_NAME = "DinMeter_Synth_firmware.bin";
@@ -329,7 +329,7 @@ bool fetchLatestGithubRelease() {
   statusText = "CHECKING GITHUB RELEASE";
 
   WiFiClientSecure client;
-  // v1.8.8 uses GitHub's release SHA-256 digest for payload integrity.
+  // v1.8.9 uses GitHub's release SHA-256 digest for payload integrity.
   // Certificate pinning can be added later without changing the OTA format.
   client.setInsecure();
 
@@ -608,7 +608,7 @@ String pageFooter() {
 
 String rootPage() {
   String h = pageHeader("DinMeter Maintenance");
-  // Keep an exact ASCII firmware marker in the linked image.\n  // Web OTA scans the selected .bin for this before upload.\n  h += F("<!-- DINMETER_FW_VERSION=v1.8.8 -->");
+  // Keep an exact ASCII firmware marker in the linked image.\n  // Web OTA scans the selected .bin for this before upload.\n  h += F("<!-- DINMETER_FW_VERSION=v1.8.9 -->");
 
   h += F("<div class='warn'>DINMETER SYNTH // MAINTENANCE</div><br>");
   h += F("<h2>Status</h2><p>");
@@ -617,12 +617,12 @@ String rootPage() {
   h += htmlEscape(wifiMaintModeText());
   h += F("<br>IP: ");
   h += htmlEscape(wifiMaintIp());
-  h += F("<br>Firmware: v1.8.8");
+  h += F("<br>Firmware: v1.8.9");
   h += F("</p>");
 
   h += F("<hr><h2>GitHub Release Update</h2>");
   h += F("<div class='verbox'>");
-  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='ghCurrent' class='vervalue'>v1.8.8</span></div>");
+  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='ghCurrent' class='vervalue'>v1.8.9</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>LATEST</span><span id='ghLatest' class='vervalue'>--</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>STATUS</span><span id='ghState' class='vervalue'>CHECKING...</span></div>");
   h += F("</div>");
@@ -636,7 +636,7 @@ String rootPage() {
   h += F("<input id='fwFile' type='file' name='firmware' accept='.bin' required>");
   h += F("<button id='fwBtn' type='submit' disabled>SELECT FIRMWARE FIRST</button></form>");
   h += F("<div class='verbox'>");
-  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='currentVersion' class='vervalue'>v1.8.8</span></div>");
+  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='currentVersion' class='vervalue'>v1.8.9</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>SELECTED</span><span id='selectedVersion' class='vervalue'>--</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>ACTION</span><span id='versionAction' class='vervalue'>SELECT FILE</span></div>");
   h += F("</div>");
@@ -658,7 +658,7 @@ String rootPage() {
   h += F("const ghCheckBtn=document.getElementById('ghCheckBtn');");
   h += F("const ghUpdateBtn=document.getElementById('ghUpdateBtn');");
   h += F("const ghStatus=document.getElementById('ghStatus');");
-  h += F("const CURRENT_VERSION='v1.8.8';");
+  h += F("const CURRENT_VERSION='v1.8.9';");
   h += F("let rebootMode=false;");
   h += F("let detectedVersion='';");
   h += F("let versionRelation='unknown';");
@@ -982,11 +982,11 @@ void registerWebRoutes() {
   server.on("/health", HTTP_GET, []() {
     server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json; charset=utf-8",
-                "{\"ok\":true,\"version\":\"v1.8.8\"}");
+                "{\"ok\":true,\"version\":\"v1.8.9\"}");
   });
 
   server.on("/github-status", HTTP_GET, []() {
-    String j = "{\"current\":\"v1.8.8\",\"latest\":\"";
+    String j = "{\"current\":\"v1.8.9\",\"latest\":\"";
     j += jsonEscape(githubLatestVersion.length() ? githubLatestVersion : String("--"));
     j += "\",\"status\":\"";
     j += jsonEscape(githubOtaStatus);
@@ -1654,6 +1654,54 @@ String wifiMaintStatus() {
   return statusText;
 }
 
+uint8_t wifiMaintProfileCount() {
+  return wifiProfileCount();
+}
+
+String wifiMaintProfileSsid(uint8_t ordinal) {
+  uint8_t seen = 0;
+  for (uint8_t slot = 0; slot < WIFI_PROFILE_MAX; ++slot) {
+    if (wifiProfileSsid[slot].length() == 0) continue;
+    if (seen == ordinal) return wifiProfileSsid[slot];
+    ++seen;
+  }
+  return "";
+}
+
+int wifiMaintPreferredProfile() {
+  if (preferredProfile < 0 || preferredProfile >= WIFI_PROFILE_MAX) return -1;
+
+  uint8_t seen = 0;
+  for (uint8_t slot = 0; slot < WIFI_PROFILE_MAX; ++slot) {
+    if (wifiProfileSsid[slot].length() == 0) continue;
+    if ((int)slot == preferredProfile) return (int)seen;
+    ++seen;
+  }
+  return -1;
+}
+
+bool wifiMaintSelectProfile(int ordinal) {
+  if (ordinal < 0) {
+    preferredProfile = -1;
+    wifiPrefs.remove("preferred");
+    return true;
+  }
+
+  uint8_t seen = 0;
+  for (uint8_t slot = 0; slot < WIFI_PROFILE_MAX; ++slot) {
+    if (wifiProfileSsid[slot].length() == 0) continue;
+    if ((int)seen == ordinal) {
+      preferredProfile = slot;
+      wifiPrefs.putInt("preferred", slot);
+      savedSsid = wifiProfileSsid[slot];
+      savedPass = wifiProfilePass[slot];
+      return true;
+    }
+    ++seen;
+  }
+  return false;
+}
+
 void wifiMaintCheckLatestRelease() {
   if (runtimeMode != WifiMaintMode::MAINT_STA ||
       WiFi.status() != WL_CONNECTED || updating) {
@@ -1703,7 +1751,7 @@ String wifiMaintGithubStatus() {
 /*
   ======================================================================
   Module : DinMeter Wi-Fi / OTA Maintenance
-  Version: v1.8.8
+  Version: v1.8.9
   END
   ======================================================================
 */

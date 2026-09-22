@@ -834,3 +834,32 @@ DinMeter now owns MONO + LEGATO + PORTAMENTO voice handling.
   phrase is active so the two bend sources do not conflict.
 
 POLY and explicit NON-LEGATO MONO behavior remain unchanged.
+
+
+v1.9.4 MONO / GLIDE / LEGATO separation
+----------------------------------------
+The three mono-performance concepts are now independent:
+
+MONO only:
+- one voice
+- hard note-to-note switch
+- envelope retriggers for each target note
+
+MONO + GLIDE:
+- one voice
+- pitch moves according to GLIDE TIME
+- envelope retriggers for each target note
+
+MONO + LEGATO:
+- one voice
+- pitch changes immediately
+- overlapping notes do not retrigger the envelope
+
+MONO + GLIDE + LEGATO:
+- one voice
+- pitch moves according to GLIDE TIME
+- overlapping notes do not retrigger the envelope
+
+DinMeter owns the mono voice whenever GLIDE or LEGATO is active. SAM2695 native
+mono/portamento remains bypassed for those combinations to avoid the previous
+large overlapping-NoteOn transient.

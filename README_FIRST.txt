@@ -915,3 +915,16 @@ v1.9.9 stronger real-time TVF sweep
 - Static NRPN TVF cutoff is anchored at 0 so the live controllers sweep upward
   from the dark end instead of only adding a small brightening above neutral.
 - Resonance remains on NRPN 0121 for now.
+
+
+v1.9.10 live TVF depth experiment
+---------------------------------
+- Keeps internal CC16/CC17 at 127 instead of sweeping their CC values.
+- Moves SAM2695 GS TVF CUTOFF CONTROL depth itself in real time.
+- Knob 0..127 maps directly to depth 0..127:
+  0 = maximum negative, 64 = neutral, 127 = maximum positive.
+- Both assignable controllers use the same depth and are stacked to maximize
+  the available internal TVF sweep.
+- Static NRPN cutoff returns to neutral 64 so the live depth can sweep in both
+  directions around the center.
+- Resonance remains on NRPN 0121.

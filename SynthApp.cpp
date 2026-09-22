@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.9
+  Version: v1.9.10
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -34,7 +34,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.9.9";
+  "DINMETER_FW_VERSION=v1.9.10";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -499,34 +499,44 @@ void sendGsPartParameter(uint8_t ch, uint8_t addressBlock, uint8_t parameter, ui
 }
 
 void configureLiveCutoffController(uint8_t ch) {
-  // Use BOTH assignable controllers for TVF cutoff. With the static TVF base
-  // placed at minimum, the two positive controller ranges give a much wider
-  // live sweep while a held note is sounding.
+  // Assign two internal controllers to TVF cutoff, but keep the MIDI
+  // controller values pinned at maximum. The knob will move the GS TVF
+  // CUTOFF CONTROL depth itself (0..127, 64=center), which lets us test
+  // the full negative-to-positive modulation range on a sounding voice.
   sendGsPartParameter(ch, 0x10, 0x1F, LIVE_FILTER_CC1);
   sendGsPartParameter(ch, 0x10, 0x20, LIVE_FILTER_CC2);
 
-  // CC1: only TVF cutoff is active.
+  // CC1: cutoff only. Start neutral until sendLiveCutoff() sets the depth.
   sendGsPartParameter(ch, 0x20, 0x40, 0x40); // pitch: neutral
-  sendGsPartParameter(ch, 0x20, 0x41, 0x7F); // TVF cutoff: full positive range
+  sendGsPartParameter(ch, 0x20, 0x41, 0x40); // TVF cutoff: neutral
   sendGsPartParameter(ch, 0x20, 0x42, 0x40); // amplitude: neutral
   sendGsPartParameter(ch, 0x20, 0x44, 0x00); // LFO pitch depth: off
   sendGsPartParameter(ch, 0x20, 0x45, 0x00); // LFO TVF depth: off
   sendGsPartParameter(ch, 0x20, 0x46, 0x00); // LFO TVA depth: off
 
-  // CC2: same cutoff-only setup, stacked with CC1 for a wider sweep.
+  // CC2: same cutoff-only setup.
   sendGsPartParameter(ch, 0x20, 0x50, 0x40); // pitch: neutral
-  sendGsPartParameter(ch, 0x20, 0x51, 0x7F); // TVF cutoff: full positive range
+  sendGsPartParameter(ch, 0x20, 0x51, 0x40); // TVF cutoff: neutral
   sendGsPartParameter(ch, 0x20, 0x52, 0x40); // amplitude: neutral
   sendGsPartParameter(ch, 0x20, 0x54, 0x00); // LFO pitch depth: off
   sendGsPartParameter(ch, 0x20, 0x55, 0x00); // LFO TVF depth: off
   sendGsPartParameter(ch, 0x20, 0x56, 0x00); // LFO TVA depth: off
+
+  // Hold both assignable MIDI controllers at full scale. Real-time movement
+  // is now done by changing the GS cutoff-control depth, not the CC value.
+  sendCC(ch, LIVE_FILTER_CC1, 127);
+  sendCC(ch, LIVE_FILTER_CC2, 127);
 }
 
 void sendLiveCutoff(uint8_t oscIndex) {
   if (oscIndex >= 3) return;
-  const uint8_t value = oscEffectiveCutoff(oscIndex);
-  sendCC(OSC_CH[oscIndex], LIVE_FILTER_CC1, value);
-  sendCC(OSC_CH[oscIndex], LIVE_FILTER_CC2, value);
+  const uint8_t ch = OSC_CH[oscIndex];
+  const uint8_t depth = oscEffectiveCutoff(oscIndex);
+
+  // 0 = maximum negative, 64 = neutral, 127 = maximum positive.
+  // Stack CC1 and CC2 with the same depth to maximize the audible sweep.
+  sendGsPartParameter(ch, 0x20, 0x41, depth);
+  sendGsPartParameter(ch, 0x20, 0x51, depth);
 }
 
 void sendLiveCutoffAll() {
@@ -835,11 +845,12 @@ void persistLocation() {
 // ======================================================================
 
 void applyFilterAll() {
-  // Anchor static NRPN cutoff at the darkest end. The two assignable live
-  // controllers then sweep upward from that base and affect held voices.
+  // Keep the static NRPN cutoff at its neutral center. The live GS depth
+  // parameters sweep from maximum negative through neutral to maximum positive,
+  // so the same 0..127 knob can test the widest range the internal TVF exposes.
   // Resonance remains on the SAM2695 NRPN path.
   for (uint8_t i = 0; i < 3; ++i) {
-    synth.setTvf(OSC_CH[i], 0, oscEffectiveRes(i));
+    synth.setTvf(OSC_CH[i], 64, oscEffectiveRes(i));
   }
   sendLiveCutoffAll();
 }
@@ -3562,7 +3573,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.9.9");
+  M5.Display.print("FW          : v1.9.10");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -3616,7 +3627,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.9.9  LATEST ");
+    M5.Display.print("FW v1.9.10  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -4157,7 +4168,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.9");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.10");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -4207,7 +4218,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.9
+  Version: v1.9.10
   END
   ======================================================================
 */

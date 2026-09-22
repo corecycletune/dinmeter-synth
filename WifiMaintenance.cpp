@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Wi-Fi / OTA Maintenance
-  Version: v1.8.3
+  Version: v1.8.4
   ======================================================================
 */
 
@@ -100,7 +100,7 @@ String rootPage() {
   h += htmlEscape(wifiMaintModeText());
   h += F("<br>IP: ");
   h += htmlEscape(wifiMaintIp());
-  h += F("<br>Firmware: v1.8.3");
+  h += F("<br>Firmware: v1.8.4");
   h += F("</p>");
 
   h += F("<hr><h2>Firmware Update</h2>");
@@ -108,7 +108,7 @@ String rootPage() {
   h += F("<input id='fwFile' type='file' name='firmware' accept='.bin' required>");
   h += F("<button id='fwBtn' type='submit' disabled>SELECT FIRMWARE FIRST</button></form>");
   h += F("<div class='verbox'>");
-  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='currentVersion' class='vervalue'>v1.8.3</span></div>");
+  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='currentVersion' class='vervalue'>v1.8.4</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>SELECTED</span><span id='selectedVersion' class='vervalue'>--</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>ACTION</span><span id='versionAction' class='vervalue'>SELECT FILE</span></div>");
   h += F("</div>");
@@ -125,7 +125,7 @@ String rootPage() {
   h += F("const bar=document.getElementById('uploadBar');");
   h += F("const selectedVersion=document.getElementById('selectedVersion');");
   h += F("const versionAction=document.getElementById('versionAction');");
-  h += F("const CURRENT_VERSION='v1.8.3';");
+  h += F("const CURRENT_VERSION='v1.8.4';");
   h += F("let rebootMode=false;");
   h += F("let detectedVersion='';");
   h += F("let versionRelation='unknown';");
@@ -135,7 +135,6 @@ String rootPage() {
   h += F("outer:for(let i=0;i<=bytes.length-n.length;i++){");
   h += F("for(let j=0;j<n.length;j++){if(bytes[i+j]!==n[j])continue outer;}return i;}");
   h += F("return -1;}");
-  h += F("}");
 
   h += F("function readVersionAfter(bytes,start){");
   h += F("let out='';");
@@ -351,7 +350,7 @@ void registerWebRoutes() {
   server.on("/health", HTTP_GET, []() {
     server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json; charset=utf-8",
-                "{\"ok\":true,\"version\":\"v1.8.3\"}");
+                "{\"ok\":true,\"version\":\"v1.8.4\"}");
   });
 
   server.on("/ota-status", HTTP_GET, []() {
@@ -779,7 +778,7 @@ String wifiMaintStatus() {
 /*
   ======================================================================
   Module : DinMeter Wi-Fi / OTA Maintenance
-  Version: v1.8.3
+  Version: v1.8.4
   END
   ======================================================================
 */

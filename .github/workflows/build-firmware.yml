@@ -1,0 +1,71 @@
+name: Build DinMeter firmware
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+        with:
+          version: "1.x"
+
+      - name: Install M5Stack board package
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
+          arduino-cli core update-index
+          arduino-cli core install m5stack:esp32@3.2.5
+
+      - name: Install Arduino libraries
+        run: |
+          arduino-cli lib update-index
+          arduino-cli lib install "M5Unified"
+          arduino-cli lib install "M5Unit-8Angle"
+          arduino-cli lib install "M5Unit-ByteButton"
+          arduino-cli lib install "M5-SAM2695"
+
+      - name: Prepare sketch
+        run: |
+          mkdir -p ci-sketch/DinMeter_Synth_v1
+          cp DinMeter_Synth_v1.ino ci-sketch/DinMeter_Synth_v1/
+          cp *.cpp *.h ci-sketch/DinMeter_Synth_v1/
+
+          git clone --depth 1 https://github.com/enudenki/esp32-usb-host-midi-library.git /tmp/omocha
+          cp /tmp/omocha/src/* ci-sketch/DinMeter_Synth_v1/
+
+      - name: Compile firmware
+        run: |
+          mkdir -p build
+          arduino-cli compile \
+            --fqbn m5stack:esp32:m5stack_stamp_s3 \
+            --build-path build \
+            --warnings all \
+            ci-sketch/DinMeter_Synth_v1
+
+      - name: Show build outputs
+        run: ls -lah build
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dinmeter-firmware-${{ github.sha }}
+          path: |
+            build/*.bin
+            build/*.elf
+            build/*.map
+          if-no-files-found: error
+          retention-days: 30

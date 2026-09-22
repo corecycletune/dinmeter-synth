@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.8
+  Version: v1.9.9
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -34,7 +34,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.9.8";
+  "DINMETER_FW_VERSION=v1.9.9";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -461,7 +461,8 @@ void sendCC(uint8_t ch, uint8_t cc, uint8_t value) {
   sendMidi3(0xB0 | (ch & 0x0F), cc & 0x7F, value & 0x7F);
 }
 
-static constexpr uint8_t LIVE_FILTER_CC = 16;  // reserved inside DinMeter
+static constexpr uint8_t LIVE_FILTER_CC1 = 16;  // reserved inside DinMeter
+static constexpr uint8_t LIVE_FILTER_CC2 = 17;  // reserved inside DinMeter
 
 // Defined in General helpers below.
 uint8_t oscEffectiveCutoff(uint8_t oscIndex);
@@ -470,12 +471,25 @@ void applyMasterVolume() {
   synth.setMasterVolume(masterVolume);
 }
 
+uint8_t gsPartForMidiChannel(uint8_t ch) {
+  ch &= 0x0F;
+
+  // SAM2695 default GS part assignment:
+  // part 0 -> MIDI ch10 (index 9)
+  // parts 1..9 -> MIDI ch1..9 (indices 0..8)
+  // parts 10..15 -> MIDI ch11..16 (indices 10..15)
+  if (ch == 9) return 0;
+  if (ch <= 8) return ch + 1;
+  return ch;
+}
+
 void sendGsPartParameter(uint8_t ch, uint8_t addressBlock, uint8_t parameter, uint8_t value) {
-  // SAM2695 GS DT1 style message. The final xx byte is documented as
-  // don't-care by DREAM, so 0x00 is sufficient (same approach as M5 library).
+  // SAM2695 GS DT1 style message. GS addresses use PART number, not MIDI
+  // channel number, so translate the default channel->part mapping first.
+  const uint8_t part = gsPartForMidiChannel(ch);
   const uint8_t msg[11] = {
     0xF0, 0x41, 0x00, 0x42, 0x12, 0x40,
-    (uint8_t)(addressBlock | (ch & 0x0F)),
+    (uint8_t)(addressBlock | (part & 0x0F)),
     parameter,
     (uint8_t)(value & 0x7F),
     0x00,
@@ -485,21 +499,34 @@ void sendGsPartParameter(uint8_t ch, uint8_t addressBlock, uint8_t parameter, ui
 }
 
 void configureLiveCutoffController(uint8_t ch) {
-  // Assign CC16 as SAM2695 Assignable Controller 1 for this part.
-  sendGsPartParameter(ch, 0x10, 0x1F, LIVE_FILTER_CC);
+  // Use BOTH assignable controllers for TVF cutoff. With the static TVF base
+  // placed at minimum, the two positive controller ranges give a much wider
+  // live sweep while a held note is sounding.
+  sendGsPartParameter(ch, 0x10, 0x1F, LIVE_FILTER_CC1);
+  sendGsPartParameter(ch, 0x10, 0x20, LIVE_FILTER_CC2);
 
-  // Keep every CC1 side effect neutral except TVF cutoff.
+  // CC1: only TVF cutoff is active.
   sendGsPartParameter(ch, 0x20, 0x40, 0x40); // pitch: neutral
   sendGsPartParameter(ch, 0x20, 0x41, 0x7F); // TVF cutoff: full positive range
   sendGsPartParameter(ch, 0x20, 0x42, 0x40); // amplitude: neutral
   sendGsPartParameter(ch, 0x20, 0x44, 0x00); // LFO pitch depth: off
   sendGsPartParameter(ch, 0x20, 0x45, 0x00); // LFO TVF depth: off
   sendGsPartParameter(ch, 0x20, 0x46, 0x00); // LFO TVA depth: off
+
+  // CC2: same cutoff-only setup, stacked with CC1 for a wider sweep.
+  sendGsPartParameter(ch, 0x20, 0x50, 0x40); // pitch: neutral
+  sendGsPartParameter(ch, 0x20, 0x51, 0x7F); // TVF cutoff: full positive range
+  sendGsPartParameter(ch, 0x20, 0x52, 0x40); // amplitude: neutral
+  sendGsPartParameter(ch, 0x20, 0x54, 0x00); // LFO pitch depth: off
+  sendGsPartParameter(ch, 0x20, 0x55, 0x00); // LFO TVF depth: off
+  sendGsPartParameter(ch, 0x20, 0x56, 0x00); // LFO TVA depth: off
 }
 
 void sendLiveCutoff(uint8_t oscIndex) {
   if (oscIndex >= 3) return;
-  sendCC(OSC_CH[oscIndex], LIVE_FILTER_CC, oscEffectiveCutoff(oscIndex));
+  const uint8_t value = oscEffectiveCutoff(oscIndex);
+  sendCC(OSC_CH[oscIndex], LIVE_FILTER_CC1, value);
+  sendCC(OSC_CH[oscIndex], LIVE_FILTER_CC2, value);
 }
 
 void sendLiveCutoffAll() {
@@ -808,10 +835,11 @@ void persistLocation() {
 // ======================================================================
 
 void applyFilterAll() {
-  // Keep static TVF cutoff centered. The actual cutoff position is driven by
-  // the assignable live controller, which also affects already-sounding voices.
+  // Anchor static NRPN cutoff at the darkest end. The two assignable live
+  // controllers then sweep upward from that base and affect held voices.
+  // Resonance remains on the SAM2695 NRPN path.
   for (uint8_t i = 0; i < 3; ++i) {
-    synth.setTvf(OSC_CH[i], 64, oscEffectiveRes(i));
+    synth.setTvf(OSC_CH[i], 0, oscEffectiveRes(i));
   }
   sendLiveCutoffAll();
 }
@@ -1321,8 +1349,9 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
     }
 
     // Keyboard Program/Bank/our internal FX/glide settings are blocked.
-    // CC16 is reserved internally for live TVF cutoff control.
-    if (cc == 0 || cc == 32 || cc == 5 || cc == 65 || cc == LIVE_FILTER_CC ||
+    // CC16/17 are reserved internally for the two live TVF cutoff controllers.
+    if (cc == 0 || cc == 32 || cc == 5 || cc == 65 ||
+        cc == LIVE_FILTER_CC1 || cc == LIVE_FILTER_CC2 ||
         cc == 81 || cc == 91 || cc == 93 || cc == 126 || cc == 127) {
       return;
     }
@@ -3533,7 +3562,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.9.8");
+  M5.Display.print("FW          : v1.9.9");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -3587,7 +3616,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.9.8  LATEST ");
+    M5.Display.print("FW v1.9.9  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -4128,7 +4157,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.8");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.9");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -4178,7 +4207,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.8
+  Version: v1.9.9
   END
   ======================================================================
 */

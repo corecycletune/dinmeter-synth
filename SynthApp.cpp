@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.8.9
+  Version: v1.9.0
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -34,7 +34,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.8.9";
+  "DINMETER_FW_VERSION=v1.9.0";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -354,6 +354,13 @@ uint8_t systemMenuIndex = 0;
 
 bool wifiSelectActive = false;
 uint8_t wifiSelectIndex = 0;  // 0=AUTO, 1..N=saved Wi-Fi profile
+
+bool wifiSetupMenuActive = false;
+uint8_t wifiSetupMenuIndex = 0;  // ADD / DELETE / BACK
+bool wifiDeleteListActive = false;
+uint8_t wifiDeleteIndex = 0;     // saved-profile ordinal, count means BACK
+bool wifiDeleteConfirm = false;
+bool wifiDeleteChoiceYes = false;
 
 bool maintenanceConfirm = false;
 bool maintenanceChoiceYes = false;
@@ -1599,7 +1606,8 @@ void handleConfigModeChange(bool newMode) {
 }
 
 void poll8Angle() {
-  if (wifiMaintActive() || systemMenuActive || wifiSelectActive || saveDialog ||
+  if (wifiMaintActive() || systemMenuActive || wifiSelectActive || wifiSetupMenuActive ||
+      wifiDeleteListActive || wifiDeleteConfirm || saveDialog ||
       maintenanceConfirm || systemInfoActive) return;
 
   uint32_t nowMs = millis();
@@ -1772,7 +1780,8 @@ void handleBytePress(uint8_t logical) {
 }
 
 void pollByteButton() {
-  if (wifiMaintActive() || systemMenuActive || wifiSelectActive || saveDialog ||
+  if (wifiMaintActive() || systemMenuActive || wifiSelectActive || wifiSetupMenuActive ||
+      wifiDeleteListActive || wifiDeleteConfirm || saveDialog ||
       maintenanceConfirm || systemInfoActive) return;
 
   uint32_t nowMs = millis();
@@ -1858,6 +1867,9 @@ void openSystemMenu() {
 
   saveDialog = false;
   wifiSelectActive = false;
+  wifiSetupMenuActive = false;
+  wifiDeleteListActive = false;
+  wifiDeleteConfirm = false;
   maintenanceConfirm = false;
   usbFlashConfirm = false;
   systemInfoActive = false;
@@ -1871,6 +1883,9 @@ void closeSystemMenu() {
   systemMenuActive = false;
   saveDialog = false;
   wifiSelectActive = false;
+  wifiSetupMenuActive = false;
+  wifiDeleteListActive = false;
+  wifiDeleteConfirm = false;
   maintenanceConfirm = false;
   usbFlashConfirm = false;
   systemInfoActive = false;
@@ -2022,7 +2037,10 @@ void selectSystemMenuItem() {
       return;
 
     case 2: // WIFI SETUP
-      enterWifiSetupMode();
+      systemMenuActive = false;
+      wifiSetupMenuActive = true;
+      wifiSetupMenuIndex = 0;
+      screenDirty = true;
       return;
 
     case 3: // WIFI SELECT
@@ -2085,6 +2103,31 @@ void handleEncoderRotate(int detents) {
   if (detents == 0) return;
 
   if (wifiMaintActive()) {
+    return;
+  }
+
+  if (wifiSetupMenuActive) {
+    int next = (int)wifiSetupMenuIndex + detents;
+    while (next < 0) next += 3;
+    while (next >= 3) next -= 3;
+    wifiSetupMenuIndex = (uint8_t)next;
+    screenDirty = true;
+    return;
+  }
+
+  if (wifiDeleteListActive) {
+    int optionCount = (int)wifiMaintProfileCount() + 1; // profiles + BACK
+    int next = (int)wifiDeleteIndex + detents;
+    while (next < 0) next += optionCount;
+    while (next >= optionCount) next -= optionCount;
+    wifiDeleteIndex = (uint8_t)next;
+    screenDirty = true;
+    return;
+  }
+
+  if (wifiDeleteConfirm) {
+    wifiDeleteChoiceYes = (detents > 0);
+    screenDirty = true;
     return;
   }
 
@@ -2188,6 +2231,53 @@ void handleEncoderShortPress() {
     return;
   }
 
+  if (wifiDeleteConfirm) {
+    if (wifiDeleteChoiceYes) {
+      wifiMaintDeleteProfile(wifiDeleteIndex);
+      uint8_t count = wifiMaintProfileCount();
+      if (wifiDeleteIndex > count) wifiDeleteIndex = count;
+      wifiDeleteConfirm = false;
+      wifiDeleteListActive = true;
+    } else {
+      wifiDeleteConfirm = false;
+      wifiDeleteListActive = true;
+    }
+    screenDirty = true;
+    return;
+  }
+
+  if (wifiDeleteListActive) {
+    uint8_t count = wifiMaintProfileCount();
+    if (wifiDeleteIndex >= count) {
+      wifiDeleteListActive = false;
+      wifiSetupMenuActive = true;
+      wifiSetupMenuIndex = 1;
+    } else {
+      wifiDeleteListActive = false;
+      wifiDeleteConfirm = true;
+      wifiDeleteChoiceYes = false;
+    }
+    screenDirty = true;
+    return;
+  }
+
+  if (wifiSetupMenuActive) {
+    if (wifiSetupMenuIndex == 0) {
+      wifiSetupMenuActive = false;
+      enterWifiSetupMode();
+    } else if (wifiSetupMenuIndex == 1) {
+      wifiSetupMenuActive = false;
+      wifiDeleteListActive = true;
+      wifiDeleteIndex = 0;
+      screenDirty = true;
+    } else {
+      wifiSetupMenuActive = false;
+      systemMenuActive = true;
+      screenDirty = true;
+    }
+    return;
+  }
+
   if (wifiSelectActive) {
     int selectedProfile = (wifiSelectIndex == 0) ? -1 : ((int)wifiSelectIndex - 1);
     if (wifiMaintSelectProfile(selectedProfile)) {
@@ -2270,6 +2360,28 @@ void handleEncoderShortPress() {
 void handleEncoderLongPress() {
   if (wifiMaintActive()) {
     exitWifiRuntime();
+    return;
+  }
+
+  if (wifiDeleteConfirm) {
+    wifiDeleteConfirm = false;
+    wifiDeleteListActive = true;
+    screenDirty = true;
+    return;
+  }
+
+  if (wifiDeleteListActive) {
+    wifiDeleteListActive = false;
+    wifiSetupMenuActive = true;
+    wifiSetupMenuIndex = 1;
+    screenDirty = true;
+    return;
+  }
+
+  if (wifiSetupMenuActive) {
+    wifiSetupMenuActive = false;
+    systemMenuActive = true;
+    screenDirty = true;
     return;
   }
 
@@ -2414,6 +2526,116 @@ void drawSystemMenu() {
   M5.Display.print("TURN=SELECT  PUSH=ENTER  HOLD=EXIT");
 }
 
+void drawWifiSetupMenu() {
+  clearScreen();
+  int w = M5.Display.width();
+
+  drawHazardStripe(0, 9);
+  M5.Display.drawRect(5, 14, w - 10, 116, C_AMBER);
+
+  M5.Display.setTextColor(C_YELLOW, C_BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(10, 20);
+  M5.Display.print("WIFI SETUP");
+
+  static const char* ITEMS[3] = {
+    "ADD NETWORK",
+    "DELETE NETWORK",
+    "BACK"
+  };
+
+  M5.Display.setTextSize(1);
+  for (uint8_t i = 0; i < 3; ++i) {
+    int y = 52 + i * 18;
+    if (i == wifiSetupMenuIndex) {
+      M5.Display.fillRect(10, y - 3, w - 20, 14, C_YELLOW);
+      M5.Display.setTextColor(C_BLACK, C_YELLOW);
+    } else {
+      M5.Display.setTextColor(C_WHITE, C_BLACK);
+    }
+    M5.Display.setCursor(15, y);
+    M5.Display.print(i == wifiSetupMenuIndex ? "> " : "  ");
+    M5.Display.print(ITEMS[i]);
+  }
+
+  M5.Display.setTextColor(C_GREY, C_BLACK);
+  M5.Display.setCursor(10, 116);
+  M5.Display.print("ADD = PHONE/AP SETUP");
+  M5.Display.setCursor(10, 127);
+  M5.Display.print("TURN SELECT / PUSH ENTER / HOLD BACK");
+}
+
+void drawWifiDeleteList() {
+  clearScreen();
+  int w = M5.Display.width();
+
+  drawHazardStripe(0, 9);
+  M5.Display.drawRect(5, 14, w - 10, 116, C_AMBER);
+
+  M5.Display.setTextColor(C_YELLOW, C_BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(10, 20);
+  M5.Display.print("DELETE WIFI");
+
+  M5.Display.setTextSize(1);
+  uint8_t count = wifiMaintProfileCount();
+  for (uint8_t i = 0; i <= count; ++i) {
+    int y = 45 + i * 13;
+    bool selected = i == wifiDeleteIndex;
+    if (selected) {
+      M5.Display.fillRect(10, y - 2, w - 20, 11, C_YELLOW);
+      M5.Display.setTextColor(C_BLACK, C_YELLOW);
+    } else {
+      M5.Display.setTextColor(C_WHITE, C_BLACK);
+    }
+
+    M5.Display.setCursor(15, y);
+    M5.Display.print(selected ? "> " : "  ");
+    if (i == count) {
+      M5.Display.print("BACK");
+    } else {
+      String label = wifiMaintProfileSsid(i);
+      if (label.length() > 25) label = label.substring(0, 22) + "...";
+      M5.Display.print(label);
+    }
+  }
+
+  M5.Display.setTextColor(C_GREY, C_BLACK);
+  M5.Display.setCursor(10, 126);
+  M5.Display.print("PUSH=SELECT  HOLD=BACK");
+}
+
+void drawWifiDeleteConfirm() {
+  clearScreen();
+  int w = M5.Display.width();
+
+  drawHazardStripe(0, 9);
+  M5.Display.drawRect(5, 14, w - 10, 112, C_AMBER);
+
+  M5.Display.setTextColor(C_YELLOW, C_BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(10, 22);
+  M5.Display.print("DELETE WIFI ?");
+
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(C_WHITE, C_BLACK);
+  M5.Display.setCursor(10, 53);
+  String ssid = wifiMaintProfileSsid(wifiDeleteIndex);
+  if (ssid.length() > 30) ssid = ssid.substring(0, 27) + "...";
+  M5.Display.print(ssid);
+
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(35, 88);
+  if (!wifiDeleteChoiceYes) M5.Display.setTextColor(C_BLACK, C_YELLOW);
+  else                      M5.Display.setTextColor(C_GREY, C_BLACK);
+  M5.Display.print(" NO ");
+
+  M5.Display.setCursor(145, 88);
+  if (wifiDeleteChoiceYes) M5.Display.setTextColor(C_BLACK, C_YELLOW);
+  else                     M5.Display.setTextColor(C_GREY, C_BLACK);
+  M5.Display.print(" YES ");
+}
+
 void drawWifiSelect() {
   clearScreen();
   int w = M5.Display.width();
@@ -2541,7 +2763,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.8.9");
+  M5.Display.print("FW          : v1.9.0");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -2595,10 +2817,29 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.8.9  LATEST ");
+    M5.Display.print("FW v1.9.0  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
+  } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
+             wifiMaintLastFailure().length() > 0) {
+    String failed = wifiMaintLastFailureSsid();
+    if (failed.length() > 24) failed = failed.substring(0, 21) + "...";
+    M5.Display.print("FAIL : ");
+    M5.Display.print(failed);
   } else {
     M5.Display.print("AP   : DinMeter-Setup");
+  }
+
+  if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
+      !wifiMaintUpdating() && wifiMaintLastFailure().length() > 0) {
+    String why = wifiMaintLastFailure();
+    if (why.length() > 31) why = why.substring(0, 28) + "...";
+    M5.Display.setTextColor(C_RED, C_BLACK);
+    M5.Display.setCursor(10, 114);
+    M5.Display.print(why);
+    M5.Display.setTextColor(C_GREY, C_BLACK);
+    M5.Display.setCursor(10, 126);
+    M5.Display.print("AP DinMeter-Setup / HOLD=EXIT");
+    return;
   }
 
   if (wifiMaintUpdating()) {
@@ -2980,6 +3221,12 @@ void drawUiIfNeeded() {
     drawSystemInfo();
   } else if (usbFlashConfirm) {
     drawUsbFlashConfirm();
+  } else if (wifiDeleteConfirm) {
+    drawWifiDeleteConfirm();
+  } else if (wifiDeleteListActive) {
+    drawWifiDeleteList();
+  } else if (wifiSetupMenuActive) {
+    drawWifiSetupMenu();
   } else if (wifiSelectActive) {
     drawWifiSelect();
   } else if (maintenanceConfirm) {
@@ -3101,7 +3348,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.8.9");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.0");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -3147,7 +3394,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.8.9
+  Version: v1.9.0
   END
   ======================================================================
 */

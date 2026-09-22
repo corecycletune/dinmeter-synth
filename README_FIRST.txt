@@ -815,3 +815,22 @@ this first pass remains easy to A/B test.
 The NOTE DESYNC -> PANIC/CC120 path and the forced silence used when physically
 switching PORTAMENTO modes are intentionally unchanged in v1.9.2. If clicks
 remain, those are the next two paths to isolate.
+
+
+v1.9.3 software portamento test
+--------------------------------
+DinMeter now owns MONO + LEGATO + PORTAMENTO voice handling.
+
+- First key sends the real NoteOn.
+- Overlapping keys do not send another NoteOn.
+- The sounding voice is moved with 14-bit Pitch Bend.
+- Releasing the current key glides back to the newest still-held key.
+- The final key release sends the real NoteOff for the original anchor note.
+- SAM2695 native Mono/Portamento is disabled for this path to avoid the large
+  transient observed when overlapping NoteOn messages were handled natively.
+- Pitch Bend range is +/-24 semitones for software portamento.
+- Glide updates run at about 200 Hz.
+- Incoming keyboard Pitch Bend is temporarily ignored while a software-glide
+  phrase is active so the two bend sources do not conflict.
+
+POLY and explicit NON-LEGATO MONO behavior remain unchanged.

@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.2
+  Version: v1.9.3
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -34,7 +34,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.9.2";
+  "DINMETER_FW_VERSION=v1.9.3";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -263,6 +263,23 @@ uint8_t noteOrder[128] = {};
 uint8_t heldCount = 0;
 int16_t currentMonoNote = -1;
 
+// DinMeter-owned mono/legato voice.
+// While software portamento is active, SAM2695 receives only one NoteOn per
+// phrase. Overlapping keys move that sounding voice with Pitch Bend instead
+// of creating another voice / retriggering the envelope.
+int16_t monoAnchorNote = -1;       // physical note that produced the NoteOn
+int16_t monoTargetNote = -1;       // last-note-priority destination
+int16_t monoBendCurrent = 8192;    // 14-bit MIDI Pitch Bend
+int16_t monoBendStart = 8192;
+int16_t monoBendTarget = 8192;
+uint32_t monoGlideStartedAt = 0;
+uint32_t monoGlideDurationMs = 0;
+uint32_t monoGlideLastSendAt = 0;
+
+static constexpr int16_t PITCH_BEND_CENTER = 8192;
+static constexpr uint8_t SOFTWARE_GLIDE_BEND_RANGE = 24; // +/-24 semitones
+static constexpr uint32_t GLIDE_UPDATE_MS = 5;           // ~200 Hz
+
 // ======================================================================
 // Encoder
 // ======================================================================
@@ -455,13 +472,100 @@ void sendNRPN(uint8_t ch, uint8_t msb, uint8_t lsb, uint8_t value) {
   sendCC(ch, 98, 127);
 }
 
-void setPitchBendRange2(uint8_t ch) {
+void setPitchBendRange(uint8_t ch, uint8_t semitones) {
   sendCC(ch, 101, 0);
   sendCC(ch, 100, 0);
-  sendCC(ch, 6, 2);
+  sendCC(ch, 6, semitones & 0x7F);
   sendCC(ch, 38, 0);
   sendCC(ch, 101, 127);
   sendCC(ch, 100, 127);
+}
+
+void sendPitchBend14(uint8_t ch, int bend) {
+  bend = constrain(bend, 0, 16383);
+  sendPitchBendRaw(ch, bend & 0x7F, (bend >> 7) & 0x7F);
+}
+
+bool softwarePortamentoActive() {
+  return currentPreset.mono && currentPreset.glide && currentPreset.legato;
+}
+
+void sendSoftwareBendAll(int bend) {
+  bend = constrain(bend, 0, 16383);
+  for (uint8_t i = 0; i < 3; ++i) {
+    if (currentPreset.osc[i].level > 0) {
+      sendPitchBend14(OSC_CH[i], bend);
+    }
+  }
+}
+
+void resetSoftwareBend(bool sendNow = true) {
+  monoBendCurrent = PITCH_BEND_CENTER;
+  monoBendStart = PITCH_BEND_CENTER;
+  monoBendTarget = PITCH_BEND_CENTER;
+  monoGlideStartedAt = millis();
+  monoGlideDurationMs = 0;
+  monoGlideLastSendAt = 0;
+  if (sendNow) sendSoftwareBendAll(PITCH_BEND_CENTER);
+}
+
+int bendForTargetNote(int16_t anchorNote, int16_t targetNote) {
+  if (anchorNote < 0 || targetNote < 0) return PITCH_BEND_CENTER;
+  int deltaSemitones = (int)targetNote - (int)anchorNote;
+  deltaSemitones = constrain(deltaSemitones,
+                             -(int)SOFTWARE_GLIDE_BEND_RANGE,
+                              (int)SOFTWARE_GLIDE_BEND_RANGE);
+  long offset = ((long)deltaSemitones * 8192L) / SOFTWARE_GLIDE_BEND_RANGE;
+  return constrain((int)(PITCH_BEND_CENTER + offset), 0, 16383);
+}
+
+uint32_t glideDurationFromValue(uint8_t value) {
+  // Musical response: short values stay fast while the upper half gains a
+  // wider slow-glide range. 0 = immediate, 127 ~= 2.5 s.
+  if (value == 0) return 0;
+  uint32_t v = value;
+  return 8UL + (v * v * 2492UL) / (127UL * 127UL);
+}
+
+void startSoftwareGlideTo(int16_t targetNote) {
+  if (monoAnchorNote < 0 || targetNote < 0) return;
+
+  monoTargetNote = targetNote;
+  monoBendStart = monoBendCurrent;
+  monoBendTarget = bendForTargetNote(monoAnchorNote, targetNote);
+  monoGlideStartedAt = millis();
+  monoGlideDurationMs = glideDurationFromValue(currentPreset.glideTime);
+
+  if (monoGlideDurationMs == 0 || monoBendStart == monoBendTarget) {
+    monoBendCurrent = monoBendTarget;
+    sendSoftwareBendAll(monoBendCurrent);
+    monoGlideLastSendAt = millis();
+  }
+}
+
+void updateSoftwareGlide() {
+  if (!softwarePortamentoActive()) return;
+  if (monoAnchorNote < 0) return;
+  if (monoBendCurrent == monoBendTarget) return;
+
+  uint32_t now = millis();
+  if (now - monoGlideLastSendAt < GLIDE_UPDATE_MS) return;
+  monoGlideLastSendAt = now;
+
+  if (monoGlideDurationMs == 0) {
+    monoBendCurrent = monoBendTarget;
+  } else {
+    uint32_t elapsed = now - monoGlideStartedAt;
+    if (elapsed >= monoGlideDurationMs) {
+      monoBendCurrent = monoBendTarget;
+    } else {
+      long span = (long)monoBendTarget - (long)monoBendStart;
+      monoBendCurrent = (int16_t)((long)monoBendStart +
+                        (span * (long)elapsed) / (long)monoGlideDurationMs);
+    }
+  }
+
+  sendSoftwareBendAll(monoBendCurrent);
 }
 
 // Previous firmware's spatial/chorus routing.
@@ -726,9 +830,26 @@ void applyPortamentoSwitchAll() {
 }
 
 void applyModeAndGlideAll() {
+  if (softwarePortamentoActive()) {
+    // DinMeter owns mono note priority + glide in this mode. Keep SAM2695 in
+    // poly with native portamento OFF so an overlapping NoteOn can never
+    // create the large transient observed with native MONO + LEGATO.
+    for (uint8_t i = 0; i < 3; ++i) {
+      sendCC(OSC_CH[i], 127, 0);  // Poly Mode On internally
+      sendCC(OSC_CH[i], 65, 0);   // native Portamento Off
+      setPitchBendRange(OSC_CH[i], SOFTWARE_GLIDE_BEND_RANGE);
+    }
+    resetSoftwareBend(true);
+    return;
+  }
+
   applyMonoModeAll();
   applyGlideTimeAll();
   applyPortamentoSwitchAll();
+  for (uint8_t i = 0; i < 3; ++i) {
+    setPitchBendRange(OSC_CH[i], 2);
+  }
+  resetSoftwareBend(true);
 }
 
 void applyOscStatic(uint8_t oscIndex) {
@@ -740,7 +861,7 @@ void applyOscStatic(uint8_t oscIndex) {
   sendProgram(ch, o.program);
   delay(2);
 
-  setPitchBendRange2(ch);
+  setPitchBendRange(ch, softwarePortamentoActive() ? SOFTWARE_GLIDE_BEND_RANGE : 2);
   synth.setTuning(ch, fineTuneValueFromCents(o.detune), 64);
   synth.setPan(ch, o.pan);
   synth.setVolume(ch, scaledOscLevel(o.level));
@@ -757,6 +878,9 @@ void silenceSynthOnly() {
     sendCC(OSC_CH[i], 120, 0);
   }
   currentMonoNote = -1;
+  monoAnchorNote = -1;
+  monoTargetNote = -1;
+  resetSoftwareBend(false);
 }
 
 void clearHeldState() {
@@ -764,6 +888,9 @@ void clearHeldState() {
   memset(heldVelocity, 0, sizeof(heldVelocity));
   heldCount = 0;
   currentMonoNote = -1;
+  monoAnchorNote = -1;
+  monoTargetNote = -1;
+  resetSoftwareBend(false);
 }
 
 void pushNoteOrder(uint8_t note) {
@@ -818,11 +945,21 @@ void sendLayeredNote(uint8_t messageType, uint8_t inputNote, uint8_t velocity) {
 
 void rebuildHeldNotes() {
   currentMonoNote = -1;
+  monoAnchorNote = -1;
+  monoTargetNote = -1;
+  resetSoftwareBend(true);
 
-  // In MONO + LEGATO, SAM2695 owns mono note priority. Re-send every
-  // physically held NoteOn in its original order so its internal mono stack
-  // is reconstructed correctly. For explicit NON-LEGATO mono, DinMeter keeps
-  // the older single-note retrigger behavior.
+  if (softwarePortamentoActive()) {
+    int16_t n = lastHeldNote();
+    if (n >= 0) {
+      monoAnchorNote = n;
+      monoTargetNote = n;
+      currentMonoNote = n;
+      sendLayeredNote(0x90, (uint8_t)n, heldVelocity[n]);
+    }
+    return;
+  }
+
   if (currentPreset.mono && !currentPreset.legato) {
     int16_t n = lastHeldNote();
     if (n >= 0) {
@@ -909,16 +1046,31 @@ void handleNoteOn(uint8_t note, uint8_t velocity) {
     return;
   }
 
+  if (softwarePortamentoActive()) {
+    if (monoAnchorNote < 0) {
+      // First note of a phrase: start the actual oscillator voice once.
+      resetSoftwareBend(true);
+      monoAnchorNote = note;
+      monoTargetNote = note;
+      currentMonoNote = note;
+      sendLayeredNote(0x90, note, velocity);
+      return;
+    }
+
+    // Legato overlap: do NOT send another NoteOn. Keep the same voice and
+    // envelope alive, and move only its pitch to the newest held note.
+    currentMonoNote = note;
+    startSoftwareGlideTo(note);
+    return;
+  }
+
   if (currentPreset.legato) {
-    // Let SAM2695's native Mono Mode own note priority and portamento.
-    // Crucially, do NOT manufacture an early NoteOff for the previous key.
-    // The real NoteOff will arrive when that physical key is released.
     sendLayeredNote(0x90, note, velocity);
     currentMonoNote = note;
     return;
   }
 
-  // Explicit NON-LEGATO mono keeps the old hard-retrigger behavior.
+  // Explicit NON-LEGATO mono retains hard retrigger behavior.
   if (currentMonoNote < 0) {
     sendLayeredNote(0x90, note, velocity);
     currentMonoNote = note;
@@ -935,8 +1087,8 @@ void handleNoteOff(uint8_t note, uint8_t velocity) {
   if (!heldInput[note]) {
     if (recoveringFromPanic) return;
 
-    // Keep the existing desync safety in this first click-fix pass.
-    // If clicks remain, this hard panic path is the next item to isolate.
+    // Existing stuck-note protection. This is independent of the software
+    // portamento voice manager and can be relaxed separately if necessary.
     panicAll("NOTE DESYNC");
     return;
   }
@@ -950,9 +1102,33 @@ void handleNoteOff(uint8_t note, uint8_t velocity) {
     return;
   }
 
+  if (softwarePortamentoActive()) {
+    int16_t next = lastHeldNote();
+
+    if (next < 0) {
+      // End of phrase. The only real NoteOn was the anchor note, so release
+      // that same note after returning bend to neutral.
+      resetSoftwareBend(true);
+      if (monoAnchorNote >= 0) {
+        sendLayeredNote(0x80, (uint8_t)monoAnchorNote, velocity);
+      }
+      monoAnchorNote = -1;
+      monoTargetNote = -1;
+      currentMonoNote = -1;
+      return;
+    }
+
+    // Releasing a non-current held key changes only the stack.
+    if (currentMonoNote != note) return;
+
+    // Last-note priority: glide the same sounding voice back to the newest
+    // still-held key, again without retriggering its envelope.
+    currentMonoNote = next;
+    startSoftwareGlideTo(next);
+    return;
+  }
+
   if (currentPreset.legato) {
-    // Match the real keyboard stream. SAM2695 decides which still-held note
-    // becomes active again in native Mono Mode.
     sendLayeredNote(0x80, note, velocity);
     currentMonoNote = lastHeldNote();
     return;
@@ -1071,6 +1247,11 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
   }
 
   if (cin == 0xE) {
+    // Software portamento owns Pitch Bend while a legato phrase is active.
+    // Combining wheel bend with glide can be added later; for now avoid the
+    // two controllers fighting over the same 14-bit bend value.
+    if (softwarePortamentoActive()) return;
+
     for (uint8_t i = 0; i < 3; ++i) {
       sendPitchBendRaw(OSC_CH[i], packet[2], packet[3]);
     }
@@ -3238,7 +3419,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.9.2");
+  M5.Display.print("FW          : v1.9.3");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -3292,7 +3473,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.9.2  LATEST ");
+    M5.Display.print("FW v1.9.3  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -3827,7 +4008,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.2");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.3");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -3858,6 +4039,10 @@ void synthAppLoop() {
   // Critical: keep USB Host serviced continuously during normal operation.
   usbMidi.update();
 
+  // DinMeter-owned mono glide runs independently of the slower UI/control
+  // polling so pitch motion remains continuous while keys are held.
+  updateSoftwareGlide();
+
   poll8Angle();
   pollByteButton();
 
@@ -3873,7 +4058,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.2
+  Version: v1.9.3
   END
   ======================================================================
 */

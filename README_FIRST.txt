@@ -791,3 +791,27 @@ characters.
 
 MANUAL / PHONE SETUP keeps the existing DinMeter-Setup AP/browser path as a
 fallback for hidden networks or cases where on-device entry is inconvenient.
+
+
+v1.9.2 click-reduction pass 1
+------------------------------
+This release isolates the two highest-probability causes of clicks during
+mono/portamento playing.
+
+1. GLIDE TIME no longer resends the whole mono/portamento mode block.
+   Moving the GLIDE TIME knob now sends only MIDI CC5 (Portamento Time).
+   CC126/127 (Mono/Poly) and CC65 (Portamento On/Off) are no longer repeatedly
+   resent for every small time change.
+
+2. In MONO + LEGATO, SAM2695 now owns mono note priority and portamento.
+   DinMeter forwards the real overlapping NoteOn/NoteOff stream instead of
+   manufacturing an early NoteOff for the previous key. This removes the
+   previous double-management path where both DinMeter and SAM2695 were trying
+   to decide which mono voice should be active.
+
+NON-LEGATO mono keeps the existing explicit hard-retrigger behavior for now so
+this first pass remains easy to A/B test.
+
+The NOTE DESYNC -> PANIC/CC120 path and the forced silence used when physically
+switching PORTAMENTO modes are intentionally unchanged in v1.9.2. If clicks
+remain, those are the next two paths to isolate.

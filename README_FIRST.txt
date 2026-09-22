@@ -764,3 +764,30 @@ SYSTEM MENU -> WIFI SETUP is now a physical management submenu:
 
 Password entry remains in the phone/PC browser because entering arbitrary Wi-Fi
 passwords with one encoder would be unnecessarily difficult.
+
+
+v1.9.1 on-device Wi-Fi scan and reusable text editor
+----------------------------------------------------
+SYSTEM MENU -> WIFI SETUP -> ADD NETWORK now scans nearby 2.4 GHz Wi-Fi
+networks on the DinMeter itself. The list is ordered by signal strength and
+marks saved/secured networks. It also provides RESCAN, MANUAL / PHONE SETUP,
+and BACK entries.
+
+Selecting:
+- a saved network: reuses its saved password and connects
+- an open network: saves it without a password and connects
+- a new secured network: opens the on-device PASSWORD text editor
+
+The reusable text editor is designed for later preset-name editing too.
+During text entry, the eight ByteButton keys are mapped left-to-right and the
+screen shows their functions:
+
+ABC | abc | 123 | SYM | SPC | DEL | CAN | OK
+
+The encoder selects a character inside the active character group and a short
+press enters that character. The password is masked; the screen shows length
+and the last entered character. WPA-style secured passwords require 8-63
+characters.
+
+MANUAL / PHONE SETUP keeps the existing DinMeter-Setup AP/browser path as a
+fallback for hidden networks or cases where on-device entry is inconvenient.

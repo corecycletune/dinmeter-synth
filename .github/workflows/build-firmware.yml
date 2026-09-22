@@ -75,7 +75,7 @@ jobs:
         run: |
           mkdir -p build
           arduino-cli compile \
-            --fqbn m5stack:esp32:m5stack_stamp_s3 \
+            --fqbn m5stack:esp32:m5stack_stamp_s3:PartitionScheme=default_8MB \
             --build-path build \
             --warnings all \
             ci-sketch/DinMeter_Synth_v1

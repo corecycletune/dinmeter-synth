@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Wi-Fi / OTA Maintenance
-  Version: v1.8.5
+  Version: v1.8.6
   ======================================================================
 */
 
@@ -58,7 +58,7 @@ String githubAssetDigest = "";
 String githubOtaStatus = "NOT CHECKED";
 size_t githubAssetSize = 0;
 
-static constexpr const char* CURRENT_FW_VERSION = "v1.8.5";
+static constexpr const char* CURRENT_FW_VERSION = "v1.8.6";
 static constexpr const char* GITHUB_LATEST_API =
     "https://api.github.com/repos/corecycletune/dinmeter-synth/releases/latest";
 static constexpr const char* GITHUB_ASSET_NAME = "DinMeter_Synth_firmware.bin";
@@ -211,7 +211,7 @@ bool fetchLatestGithubRelease() {
   statusText = "CHECKING GITHUB RELEASE";
 
   WiFiClientSecure client;
-  // v1.8.5 uses GitHub's release SHA-256 digest for payload integrity.
+  // v1.8.6 uses GitHub's release SHA-256 digest for payload integrity.
   // Certificate pinning can be added later without changing the OTA format.
   client.setInsecure();
 
@@ -438,6 +438,25 @@ String htmlEscape(const String& s) {
   return out;
 }
 
+String jsonEscape(const String& s) {
+  String out;
+  out.reserve(s.length() + 16);
+  for (size_t i = 0; i < s.length(); ++i) {
+    char c = s[i];
+    switch (c) {
+      case '\\': out += "\\\\"; break;
+      case '"':  out += "\\\""; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if ((uint8_t)c >= 0x20) out += c;
+        break;
+    }
+  }
+  return out;
+}
+
 String pageHeader(const char* title) {
   String h;
   h.reserve(1400);
@@ -471,7 +490,7 @@ String pageFooter() {
 
 String rootPage() {
   String h = pageHeader("DinMeter Maintenance");
-  // Keep an exact ASCII firmware marker in the linked image.\n  // Web OTA scans the selected .bin for this before upload.\n  h += F("<!-- DINMETER_FW_VERSION=v1.8.5 -->");
+  // Keep an exact ASCII firmware marker in the linked image.\n  // Web OTA scans the selected .bin for this before upload.\n  h += F("<!-- DINMETER_FW_VERSION=v1.8.6 -->");
 
   h += F("<div class='warn'>DINMETER SYNTH // MAINTENANCE</div><br>");
   h += F("<h2>Status</h2><p>");
@@ -480,15 +499,26 @@ String rootPage() {
   h += htmlEscape(wifiMaintModeText());
   h += F("<br>IP: ");
   h += htmlEscape(wifiMaintIp());
-  h += F("<br>Firmware: v1.8.5");
+  h += F("<br>Firmware: v1.8.6");
   h += F("</p>");
 
-  h += F("<hr><h2>Firmware Update</h2>");
+  h += F("<hr><h2>GitHub Release Update</h2>");
+  h += F("<div class='verbox'>");
+  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='ghCurrent' class='vervalue'>v1.8.6</span></div>");
+  h += F("<div class='verrow'><span class='verlabel'>LATEST</span><span id='ghLatest' class='vervalue'>--</span></div>");
+  h += F("<div class='verrow'><span class='verlabel'>STATUS</span><span id='ghState' class='vervalue'>CHECKING...</span></div>");
+  h += F("</div>");
+  h += F("<button id='ghCheckBtn' type='button'>CHECK GITHUB</button>");
+  h += F("<button id='ghUpdateBtn' type='button' disabled>UPDATE FROM GITHUB</button>");
+  h += F("<div id='ghStatus' class='muted'>Uses the public GitHub Release firmware. The unit verifies size and SHA-256 before reboot.</div>");
+  h += F("<p class='muted'>If GitHub update is unavailable, use Manual Firmware Upload below. USB FLASH remains the final recovery path.</p>");
+
+  h += F("<hr><h2>Manual Firmware Upload</h2>");
   h += F("<form id='fwForm'>");
   h += F("<input id='fwFile' type='file' name='firmware' accept='.bin' required>");
   h += F("<button id='fwBtn' type='submit' disabled>SELECT FIRMWARE FIRST</button></form>");
   h += F("<div class='verbox'>");
-  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='currentVersion' class='vervalue'>v1.8.5</span></div>");
+  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='currentVersion' class='vervalue'>v1.8.6</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>SELECTED</span><span id='selectedVersion' class='vervalue'>--</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>ACTION</span><span id='versionAction' class='vervalue'>SELECT FILE</span></div>");
   h += F("</div>");
@@ -505,7 +535,12 @@ String rootPage() {
   h += F("const bar=document.getElementById('uploadBar');");
   h += F("const selectedVersion=document.getElementById('selectedVersion');");
   h += F("const versionAction=document.getElementById('versionAction');");
-  h += F("const CURRENT_VERSION='v1.8.5';");
+  h += F("const ghLatest=document.getElementById('ghLatest');");
+  h += F("const ghState=document.getElementById('ghState');");
+  h += F("const ghCheckBtn=document.getElementById('ghCheckBtn');");
+  h += F("const ghUpdateBtn=document.getElementById('ghUpdateBtn');");
+  h += F("const ghStatus=document.getElementById('ghStatus');");
+  h += F("const CURRENT_VERSION='v1.8.6';");
   h += F("let rebootMode=false;");
   h += F("let detectedVersion='';");
   h += F("let versionRelation='unknown';");
@@ -545,6 +580,46 @@ String rootPage() {
   h += F("const x=verParts(a),y=verParts(b);if(!x||!y)return null;");
   h += F("for(let i=0;i<3;i++){if(x[i]<y[i])return -1;if(x[i]>y[i])return 1;}return 0;");
   h += F("}");
+
+  h += F("async function refreshGithubStatus(){");
+  h += F("try{");
+  h += F("const r=await fetch('/github-status?t='+Date.now(),{cache:'no-store'});");
+  h += F("if(!r.ok)throw new Error(await r.text());");
+  h += F("const j=await r.json();");
+  h += F("ghLatest.textContent=j.latest||'--';");
+  h += F("ghState.textContent=j.status||'UNKNOWN';");
+  h += F("ghState.className='vervalue '+(j.available?'upgrade':(j.error?'bad':'same'));");
+  h += F("ghUpdateBtn.disabled=!j.available||j.busy||j.updating;");
+  h += F("ghUpdateBtn.textContent=j.available?('UPDATE TO '+j.latest):'UPDATE FROM GITHUB';");
+  h += F("ghCheckBtn.disabled=j.busy||j.updating;");
+  h += F("ghStatus.textContent=(j.updating?'UPDATE IN PROGRESS - WATCH DINMETER SCREEN':(j.status||''));");
+  h += F("ghStatus.className=j.error?'bad':(j.available?'ok':'muted');");
+  h += F("}catch(e){ghState.textContent='UNAVAILABLE';ghState.className='vervalue bad';ghStatus.textContent='GITHUB STATUS ERROR: '+e.message;ghStatus.className='bad';ghUpdateBtn.disabled=true;}");
+  h += F("}");
+
+  h += F("async function waitForGithubReboot(){");
+  h += F("ghCheckBtn.disabled=true;ghUpdateBtn.disabled=true;");
+  h += F("for(let i=0;i<70;i++){");
+  h += F("try{const r=await fetch('/health?t='+Date.now(),{cache:'no-store'});if(r.ok){const j=await r.json();if(j.version&&j.version!==CURRENT_VERSION){location.href='/?t='+Date.now();return;}}}catch(e){}");
+  h += F("ghStatus.textContent='UPDATING / REBOOTING... '+(i+1);ghStatus.className='ok';");
+  h += F("await new Promise(r=>setTimeout(r,1000));");
+  h += F("}");
+  h += F("ghStatus.textContent='DINMETER NOT BACK YET - CHECK THE UNIT SCREEN';ghStatus.className='bad';ghCheckBtn.disabled=false;");
+  h += F("}");
+
+  h += F("ghCheckBtn.addEventListener('click',async()=>{");
+  h += F("ghCheckBtn.disabled=true;ghStatus.textContent='CHECKING GITHUB...';");
+  h += F("try{const r=await fetch('/github-check',{method:'POST',cache:'no-store'});if(!r.ok)throw new Error(await r.text());await new Promise(r=>setTimeout(r,800));await refreshGithubStatus();}catch(e){ghStatus.textContent='CHECK FAILED: '+e.message;ghStatus.className='bad';ghCheckBtn.disabled=false;}");
+  h += F("});");
+
+  h += F("ghUpdateBtn.addEventListener('click',async()=>{");
+  h += F("if(!confirm('Install '+ghLatest.textContent+' from GitHub?\\n\\nThe DinMeter will verify the firmware and reboot automatically.'))return;");
+  h += F("ghUpdateBtn.disabled=true;ghCheckBtn.disabled=true;ghStatus.textContent='STARTING GITHUB UPDATE - DO NOT POWER OFF';ghStatus.className='ok';");
+  h += F("try{const r=await fetch('/github-update',{method:'POST',cache:'no-store'});if(!r.ok)throw new Error(await r.text());await new Promise(r=>setTimeout(r,700));waitForGithubReboot();}catch(e){ghStatus.textContent='UPDATE START FAILED: '+e.message;ghStatus.className='bad';ghCheckBtn.disabled=false;await refreshGithubStatus();}");
+  h += F("});");
+
+  h += F("refreshGithubStatus();");
+  h += F("setInterval(()=>{if(!document.hidden)refreshGithubStatus();},5000);");
 
   h += F("file.addEventListener('change',async()=>{");
   h += F("rebootMode=false;detectedVersion='';versionRelation='unknown';");
@@ -677,7 +752,7 @@ String rootPage() {
   h += F("<button type='submit'>SAVE WIFI</button></form>");
   h += F("<p class='muted'>Credentials are stored in ESP32 NVS, not in the sketch source.</p>");
 
-  h += F("<hr><p class='muted'>Arduino IDE OTA hostname: <b>DinMeter-Synth</b><br>");
+  h += F("<hr><p class='muted'>Arduino IDE OTA hostname: <b>dinmeter</b><br>");
   h += F("Browser address on home Wi-Fi: <b>http://dinmeter.local/</b><br>");
   h += F("Emergency wired recovery: SYSTEM MENU -> <b>USB FLASH</b></p>");
 
@@ -730,7 +805,75 @@ void registerWebRoutes() {
   server.on("/health", HTTP_GET, []() {
     server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json; charset=utf-8",
-                "{\"ok\":true,\"version\":\"v1.8.5\"}");
+                "{\"ok\":true,\"version\":\"v1.8.6\"}");
+  });
+
+  server.on("/github-status", HTTP_GET, []() {
+    String j = "{\"current\":\"v1.8.6\",\"latest\":\"";
+    j += jsonEscape(githubLatestVersion.length() ? githubLatestVersion : String("--"));
+    j += "\",\"status\":\"";
+    j += jsonEscape(githubOtaStatus);
+    j += "\",\"available\":";
+    j += (githubOtaState == GithubOtaState::AVAILABLE) ? "true" : "false";
+    j += ",\"busy\":";
+    j += (githubOtaState == GithubOtaState::CHECK_QUEUED ||
+          githubOtaState == GithubOtaState::CHECKING ||
+          githubOtaState == GithubOtaState::UPDATE_QUEUED ||
+          githubOtaState == GithubOtaState::DOWNLOADING) ? "true" : "false";
+    j += ",\"updating\":";
+    j += updating ? "true" : "false";
+    j += ",\"error\":";
+    j += (githubOtaState == GithubOtaState::ERROR) ? "true" : "false";
+    j += ",\"progress\":";
+    j += String(updateProgress);
+    j += "}";
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json; charset=utf-8", j);
+  });
+
+  server.on("/github-check", HTTP_POST, []() {
+    if (runtimeMode != WifiMaintMode::MAINT_STA || WiFi.status() != WL_CONNECTED) {
+      server.send(409, "application/json; charset=utf-8",
+                  "{\"ok\":false,\"error\":\"HOME WIFI REQUIRED\"}");
+      return;
+    }
+    if (updating || githubOtaState == GithubOtaState::DOWNLOADING ||
+        githubOtaState == GithubOtaState::UPDATE_QUEUED) {
+      server.send(409, "application/json; charset=utf-8",
+                  "{\"ok\":false,\"error\":\"UPDATE BUSY\"}");
+      return;
+    }
+
+    githubOtaState = GithubOtaState::CHECK_QUEUED;
+    githubOtaStatus = "CHECK QUEUED";
+    statusText = "CHECKING GITHUB RELEASE";
+
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(202, "application/json; charset=utf-8",
+                "{\"ok\":true,\"message\":\"check queued\"}");
+  });
+
+  server.on("/github-update", HTTP_POST, []() {
+    if (runtimeMode != WifiMaintMode::MAINT_STA || WiFi.status() != WL_CONNECTED) {
+      server.send(409, "application/json; charset=utf-8",
+                  "{\"ok\":false,\"error\":\"HOME WIFI REQUIRED\"}");
+      return;
+    }
+    if (githubOtaState != GithubOtaState::AVAILABLE || updating) {
+      server.send(409, "application/json; charset=utf-8",
+                  "{\"ok\":false,\"error\":\"NO UPDATE AVAILABLE\"}");
+      return;
+    }
+
+    githubOtaState = GithubOtaState::UPDATE_QUEUED;
+    githubOtaStatus = "UPDATE QUEUED";
+    statusText = "STARTING GITHUB UPDATE";
+    updateProgress = 0;
+    updating = true;
+
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(202, "application/json; charset=utf-8",
+                "{\"ok\":true,\"message\":\"update queued\"}");
   });
 
   server.on("/ota-status", HTTP_GET, []() {
@@ -1214,7 +1357,7 @@ String wifiMaintGithubStatus() {
 /*
   ======================================================================
   Module : DinMeter Wi-Fi / OTA Maintenance
-  Version: v1.8.5
+  Version: v1.8.6
   END
   ======================================================================
 */

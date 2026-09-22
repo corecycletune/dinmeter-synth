@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.8.4
+  Version: v1.8.5
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -34,7 +34,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.8.4";
+  "DINMETER_FW_VERSION=v1.8.5";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -2140,8 +2140,21 @@ void openSaveDialog() {
 }
 
 void handleEncoderShortPress() {
-  // During maintenance/setup, short press exits unless an OTA write is active.
+  // In HOME WIFI maintenance, short press is the physical GitHub update action.
+  // In AP/setup modes, short press keeps the old "exit" behavior.
   if (wifiMaintActive()) {
+    if (wifiMaintUpdating()) return;
+
+    if (wifiMaintMode() == WifiMaintMode::MAINT_STA) {
+      if (wifiMaintGithubUpdateAvailable()) {
+        wifiMaintStartGithubUpdate();
+      } else {
+        wifiMaintCheckLatestRelease();
+      }
+      screenDirty = true;
+      return;
+    }
+
     exitWifiRuntime();
     return;
   }
@@ -2209,7 +2222,10 @@ void handleEncoderShortPress() {
 }
 
 void handleEncoderLongPress() {
-  if (wifiMaintActive()) return;
+  if (wifiMaintActive()) {
+    exitWifiRuntime();
+    return;
+  }
   if (saveDialog || maintenanceConfirm || usbFlashConfirm || systemInfoActive) return;
 
   if (systemMenuActive) {
@@ -2423,7 +2439,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.8.4");
+  M5.Display.print("FW          : v1.8.5");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -2477,7 +2493,8 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("WEB  : http://dinmeter.local/");
+    M5.Display.print("FW v1.8.5  LATEST ");
+    M5.Display.print(wifiMaintLatestVersion());
   } else {
     M5.Display.print("AP   : DinMeter-Setup");
   }
@@ -2486,12 +2503,34 @@ void drawWifiRuntimeScreen() {
     M5.Display.setTextColor(C_GREEN, C_BLACK);
     M5.Display.setCursor(10, 114);
     M5.Display.printf("UPDATING... %d%%", wifiMaintProgress());
+    M5.Display.setTextColor(C_GREY, C_BLACK);
+    M5.Display.setCursor(10, 126);
+    M5.Display.print("DO NOT POWER OFF");
+    return;
+  }
+
+  M5.Display.setCursor(10, 114);
+  if (wifiMaintMode() == WifiMaintMode::MAINT_STA) {
+    if (wifiMaintGithubUpdateAvailable()) {
+      M5.Display.setTextColor(C_GREEN, C_BLACK);
+      M5.Display.print("PUSH = UPDATE ");
+      M5.Display.print(wifiMaintLatestVersion());
+    } else if (wifiMaintGithubBusy()) {
+      M5.Display.setTextColor(C_YELLOW, C_BLACK);
+      M5.Display.print("CHECKING GITHUB...");
+    } else {
+      M5.Display.setTextColor(C_GREY, C_BLACK);
+      M5.Display.print("PUSH = CHECK GITHUB");
+    }
+
+    M5.Display.setTextColor(C_GREY, C_BLACK);
+    M5.Display.setCursor(10, 126);
+    M5.Display.print("HOLD = EXIT   WEB OTA READY");
   } else {
     M5.Display.setTextColor(C_GREY, C_BLACK);
-    M5.Display.setCursor(10, 114);
-    M5.Display.print("WEB OTA / ARDUINO OTA READY");
+    M5.Display.print("WEB OTA READY");
     M5.Display.setCursor(10, 126);
-    M5.Display.print("PUSH = EXIT");
+    M5.Display.print("PUSH/HOLD = EXIT");
   }
 }
 
@@ -2958,7 +2997,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.8.4");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.8.5");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -3004,7 +3043,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.8.4
+  Version: v1.8.5
   END
   ======================================================================
 */

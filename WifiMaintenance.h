@@ -25,3 +25,11 @@ String wifiMaintModeText();
 String wifiMaintSavedSsid();
 int wifiMaintProgress();
 String wifiMaintStatus();
+
+// GitHub Release self-update (available only in HOME WIFI maintenance mode).
+void wifiMaintCheckLatestRelease();
+void wifiMaintStartGithubUpdate();
+bool wifiMaintGithubUpdateAvailable();
+bool wifiMaintGithubBusy();
+String wifiMaintLatestVersion();
+String wifiMaintGithubStatus();

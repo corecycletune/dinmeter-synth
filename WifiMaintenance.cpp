@@ -340,7 +340,7 @@ bool performGithubUpdate() {
   mbedtls_sha256_init(&sha);
   mbedtls_sha256_starts(&sha, 0);
 
-  WiFiClient* stream = http.getStreamPtr();
+  NetworkClient* stream = http.getStreamPtr();
   uint8_t buffer[2048];
   size_t total = 0;
   uint32_t lastProgressAt = millis();

@@ -34,9 +34,11 @@ jobs:
         run: |
           arduino-cli lib update-index
           arduino-cli lib install "M5Unified"
-          arduino-cli lib install "M5Unit-8Angle"
-          arduino-cli lib install "M5Unit-ByteButton"
-          arduino-cli lib install "M5-SAM2695"
+
+          mkdir -p "$HOME/Arduino/libraries"
+          git clone --depth 1 https://github.com/m5stack/M5Unit-8Angle.git "$HOME/Arduino/libraries/M5Unit-8Angle"
+          git clone --depth 1 https://github.com/m5stack/M5Unit-ByteButton.git "$HOME/Arduino/libraries/M5Unit-ByteButton"
+          git clone --depth 1 https://github.com/m5stack/M5-SAM2695.git "$HOME/Arduino/libraries/M5-SAM2695"
 
       - name: Prepare sketch
         run: |

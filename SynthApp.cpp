@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.5
+  Version: v1.9.6
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -34,7 +34,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.9.5";
+  "DINMETER_FW_VERSION=v1.9.6";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -111,7 +111,7 @@ static constexpr uint16_t C_DARK   = 0x2104;
 // The DIN Meter window hides a few pixels on the physical left edge.
 // Primary performance/config UI is inset slightly so labels and tabs remain
 // fully visible while preserving the existing right edge.
-static constexpr int PRIMARY_UI_X_OFFSET = 3;
+static constexpr int PRIMARY_UI_X_OFFSET = 6;
 
 // ======================================================================
 // Preset data
@@ -2533,7 +2533,7 @@ void showPageOverlay() {
   snprintf(overlayTitle, sizeof(overlayTitle), "PAGE CHANGE");
   snprintf(overlaySub, sizeof(overlaySub), "%02u/06 %s", configPage + 1, PAGE_NAMES[configPage]);
   overlayActive = true;
-  overlayUntil = millis() + 320;
+  overlayUntil = millis() + 500;
   screenDirty = true;
 }
 
@@ -2994,6 +2994,19 @@ void drawOverlayScreen() {
     M5.Display.print(browseBank + 1);
 
     M5.Display.setTextSize(1);
+  } else if (strcmp(overlayTitle, "PAGE CHANGE") == 0) {
+    // Page switching must be readable at a glance while the encoder is moving.
+    M5.Display.setTextColor(C_YELLOW, C_BLACK);
+    M5.Display.setTextSize(2);
+    M5.Display.setCursor(18, 29);
+    M5.Display.print("PAGE CHANGE");
+
+    M5.Display.setTextColor(C_WHITE, C_BLACK);
+    M5.Display.setTextSize(2);
+    M5.Display.setCursor(18, 67);
+    M5.Display.print(overlaySub);
+
+    M5.Display.setTextSize(1);
   } else {
     M5.Display.setTextColor(C_YELLOW, C_BLACK);
     M5.Display.setTextSize(2);
@@ -3444,7 +3457,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.9.5");
+  M5.Display.print("FW          : v1.9.6");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -3498,7 +3511,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.9.5  LATEST ");
+    M5.Display.print("FW v1.9.6  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -4039,7 +4052,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.5");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.6");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -4089,7 +4102,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.5
+  Version: v1.9.6
   END
   ======================================================================
 */

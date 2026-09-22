@@ -47,7 +47,7 @@ jobs:
           cp *.cpp *.h ci-sketch/DinMeter_Synth_v1/
 
           git clone --depth 1 https://github.com/enudenki/esp32-usb-host-midi-library.git /tmp/omocha
-          cp /tmp/omocha/src/* ci-sketch/DinMeter_Synth_v1/
+          find /tmp/omocha/src -maxdepth 1 -type f \( -name "*.cpp" -o -name "*.h" \) -exec cp {} ci-sketch/DinMeter_Synth_v1/ \;
 
       - name: Compile firmware
         run: |

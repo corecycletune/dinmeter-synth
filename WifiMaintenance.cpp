@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Wi-Fi / OTA Maintenance
-  Version: v1.9.0
+  Version: v1.9.1
   ======================================================================
 */
 
@@ -33,6 +33,13 @@ String savedPass;
 String activeSsid;
 String lastWifiFailureSsid;
 String lastWifiFailureText;
+
+static constexpr uint8_t WIFI_SCAN_MAX = 10;
+String scannedSsid[WIFI_SCAN_MAX];
+int32_t scannedRssi[WIFI_SCAN_MAX] = {};
+bool scannedSecured[WIFI_SCAN_MAX] = {};
+uint8_t scannedCount = 0;
+
 int preferredProfile = -1;       // -1 = automatic selection
 int pendingSwitchProfile = -1;   // scheduled after HTTP response is sent
 uint32_t wifiSwitchAt = 0;
@@ -68,7 +75,7 @@ String githubAssetDigest = "";
 String githubOtaStatus = "NOT CHECKED";
 size_t githubAssetSize = 0;
 
-static constexpr const char* CURRENT_FW_VERSION = "v1.9.0";
+static constexpr const char* CURRENT_FW_VERSION = "v1.9.1";
 static constexpr const char* GITHUB_LATEST_API =
     "https://api.github.com/repos/corecycletune/dinmeter-synth/releases/latest";
 static constexpr const char* GITHUB_ASSET_NAME = "DinMeter_Synth_firmware.bin";
@@ -382,7 +389,7 @@ bool fetchLatestGithubRelease() {
   statusText = "CHECKING GITHUB RELEASE";
 
   WiFiClientSecure client;
-  // v1.9.0 uses GitHub's release SHA-256 digest for payload integrity.
+  // v1.9.1 uses GitHub's release SHA-256 digest for payload integrity.
   // Certificate pinning can be added later without changing the OTA format.
   client.setInsecure();
 
@@ -661,7 +668,7 @@ String pageFooter() {
 
 String rootPage() {
   String h = pageHeader("DinMeter Maintenance");
-  // Keep an exact ASCII firmware marker in the linked image.\n  // Web OTA scans the selected .bin for this before upload.\n  h += F("<!-- DINMETER_FW_VERSION=v1.9.0 -->");
+  // Keep an exact ASCII firmware marker in the linked image.\n  // Web OTA scans the selected .bin for this before upload.\n  h += F("<!-- DINMETER_FW_VERSION=v1.9.1 -->");
 
   h += F("<div class='warn'>DINMETER SYNTH // MAINTENANCE</div><br>");
   h += F("<h2>Status</h2><p>");
@@ -670,7 +677,7 @@ String rootPage() {
   h += htmlEscape(wifiMaintModeText());
   h += F("<br>IP: ");
   h += htmlEscape(wifiMaintIp());
-  h += F("<br>Firmware: v1.9.0");
+  h += F("<br>Firmware: v1.9.1");
   if (lastWifiFailureText.length() > 0) {
     h += F("<br><span class='bad'>Last Wi-Fi failure: ");
     h += htmlEscape(lastWifiFailureSsid);
@@ -682,7 +689,7 @@ String rootPage() {
 
   h += F("<hr><h2>GitHub Release Update</h2>");
   h += F("<div class='verbox'>");
-  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='ghCurrent' class='vervalue'>v1.9.0</span></div>");
+  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='ghCurrent' class='vervalue'>v1.9.1</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>LATEST</span><span id='ghLatest' class='vervalue'>--</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>STATUS</span><span id='ghState' class='vervalue'>CHECKING...</span></div>");
   h += F("</div>");
@@ -696,7 +703,7 @@ String rootPage() {
   h += F("<input id='fwFile' type='file' name='firmware' accept='.bin' required>");
   h += F("<button id='fwBtn' type='submit' disabled>SELECT FIRMWARE FIRST</button></form>");
   h += F("<div class='verbox'>");
-  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='currentVersion' class='vervalue'>v1.9.0</span></div>");
+  h += F("<div class='verrow'><span class='verlabel'>CURRENT</span><span id='currentVersion' class='vervalue'>v1.9.1</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>SELECTED</span><span id='selectedVersion' class='vervalue'>--</span></div>");
   h += F("<div class='verrow'><span class='verlabel'>ACTION</span><span id='versionAction' class='vervalue'>SELECT FILE</span></div>");
   h += F("</div>");
@@ -718,7 +725,7 @@ String rootPage() {
   h += F("const ghCheckBtn=document.getElementById('ghCheckBtn');");
   h += F("const ghUpdateBtn=document.getElementById('ghUpdateBtn');");
   h += F("const ghStatus=document.getElementById('ghStatus');");
-  h += F("const CURRENT_VERSION='v1.9.0';");
+  h += F("const CURRENT_VERSION='v1.9.1';");
   h += F("let rebootMode=false;");
   h += F("let detectedVersion='';");
   h += F("let versionRelation='unknown';");
@@ -1042,11 +1049,11 @@ void registerWebRoutes() {
   server.on("/health", HTTP_GET, []() {
     server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json; charset=utf-8",
-                "{\"ok\":true,\"version\":\"v1.9.0\"}");
+                "{\"ok\":true,\"version\":\"v1.9.1\"}");
   });
 
   server.on("/github-status", HTTP_GET, []() {
-    String j = "{\"current\":\"v1.9.0\",\"latest\":\"";
+    String j = "{\"current\":\"v1.9.1\",\"latest\":\"";
     j += jsonEscape(githubLatestVersion.length() ? githubLatestVersion : String("--"));
     j += "\",\"status\":\"";
     j += jsonEscape(githubOtaStatus);
@@ -1806,6 +1813,119 @@ String wifiMaintLastFailure() {
   return lastWifiFailureText;
 }
 
+int wifiMaintScanNetworks() {
+  if (runtimeMode != WifiMaintMode::OFF || updating) return -1;
+
+  scannedCount = 0;
+  for (uint8_t i = 0; i < WIFI_SCAN_MAX; ++i) {
+    scannedSsid[i] = "";
+    scannedRssi[i] = -127;
+    scannedSecured[i] = false;
+  }
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.disconnect(false, false);
+  delay(120);
+
+  int found = WiFi.scanNetworks(false, true);
+  if (found < 0) {
+    WiFi.scanDelete();
+    WiFi.mode(WIFI_OFF);
+    return found;
+  }
+
+  for (int i = 0; i < found; ++i) {
+    String ssid = WiFi.SSID(i);
+    ssid.trim();
+    if (ssid.length() == 0) continue;
+
+    bool duplicate = false;
+    for (uint8_t j = 0; j < scannedCount; ++j) {
+      if (scannedSsid[j] == ssid) {
+        duplicate = true;
+        if (WiFi.RSSI(i) > scannedRssi[j]) {
+          scannedRssi[j] = WiFi.RSSI(i);
+          scannedSecured[j] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+        }
+        break;
+      }
+    }
+    if (duplicate) continue;
+
+    if (scannedCount < WIFI_SCAN_MAX) {
+      scannedSsid[scannedCount] = ssid;
+      scannedRssi[scannedCount] = WiFi.RSSI(i);
+      scannedSecured[scannedCount] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+      ++scannedCount;
+    }
+  }
+
+  // Strongest first.
+  for (uint8_t i = 0; i < scannedCount; ++i) {
+    for (uint8_t j = i + 1; j < scannedCount; ++j) {
+      if (scannedRssi[j] > scannedRssi[i]) {
+        String ssidTmp = scannedSsid[i];
+        scannedSsid[i] = scannedSsid[j];
+        scannedSsid[j] = ssidTmp;
+
+        int32_t rssiTmp = scannedRssi[i];
+        scannedRssi[i] = scannedRssi[j];
+        scannedRssi[j] = rssiTmp;
+
+        bool secTmp = scannedSecured[i];
+        scannedSecured[i] = scannedSecured[j];
+        scannedSecured[j] = secTmp;
+      }
+    }
+  }
+
+  WiFi.scanDelete();
+  WiFi.mode(WIFI_OFF);
+  return scannedCount;
+}
+
+uint8_t wifiMaintScanCount() {
+  return scannedCount;
+}
+
+String wifiMaintScanSsid(uint8_t index) {
+  if (index >= scannedCount) return "";
+  return scannedSsid[index];
+}
+
+int32_t wifiMaintScanRssi(uint8_t index) {
+  if (index >= scannedCount) return -127;
+  return scannedRssi[index];
+}
+
+bool wifiMaintScanSecured(uint8_t index) {
+  if (index >= scannedCount) return false;
+  return scannedSecured[index];
+}
+
+bool wifiMaintScanSaved(uint8_t index) {
+  if (index >= scannedCount) return false;
+  return findWifiProfile(scannedSsid[index]) >= 0;
+}
+
+bool wifiMaintSaveCredential(const String& ssid, const String& pass, bool makePreferred) {
+  String cleanSsid = ssid;
+  cleanSsid.trim();
+  if (cleanSsid.length() == 0 || cleanSsid.length() > 32 || pass.length() > 63) {
+    return false;
+  }
+
+  int slot = -1;
+  if (!saveWifiProfile(cleanSsid, pass, slot)) return false;
+
+  if (makePreferred) {
+    preferredProfile = slot;
+    wifiPrefs.putInt("preferred", slot);
+  }
+  return true;
+}
+
 void wifiMaintCheckLatestRelease() {
   if (runtimeMode != WifiMaintMode::MAINT_STA ||
       WiFi.status() != WL_CONNECTED || updating) {
@@ -1855,7 +1975,7 @@ String wifiMaintGithubStatus() {
 /*
   ======================================================================
   Module : DinMeter Wi-Fi / OTA Maintenance
-  Version: v1.9.0
+  Version: v1.9.1
   END
   ======================================================================
 */

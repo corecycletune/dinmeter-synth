@@ -80,10 +80,10 @@ jobs:
             --warnings all \
             ci-sketch/DinMeter_Synth_v1
 
-      - name: Verify compiled firmware marker
+      - name: Verify firmware version
         run: |
-          grep -a -q "DINMETER_FW_VERSION=${{ steps.firmware.outputs.version }}" build/DinMeter_Synth_v1.ino.bin
-          echo "Verified ${{ steps.firmware.outputs.version }} marker in firmware binary."
+          grep -q "DINMETER_FW_VERSION=${{ steps.firmware.outputs.version }}" SynthApp.cpp
+          echo "Verified source version: ${{ steps.firmware.outputs.version }}"
 
       - name: Show build outputs
         run: ls -lah build

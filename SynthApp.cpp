@@ -464,6 +464,9 @@ void sendCC(uint8_t ch, uint8_t cc, uint8_t value) {
 
 static constexpr uint8_t LIVE_FILTER_CC = 16;  // reserved inside DinMeter
 
+// Defined in General helpers below.
+uint8_t oscEffectiveCutoff(uint8_t oscIndex);
+
 uint8_t effectiveMasterVolume() {
   return (uint8_t)(((uint16_t)masterVolume * (uint16_t)keyboardVolume + 63) / 127);
 }

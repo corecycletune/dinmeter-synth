@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.4
+  Version: v1.9.5
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -34,7 +34,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.9.4";
+  "DINMETER_FW_VERSION=v1.9.5";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -107,6 +107,11 @@ static constexpr uint16_t C_BLUE   = 0x001F;
 static constexpr uint16_t C_WHITE  = 0xFFFF;
 static constexpr uint16_t C_GREY   = 0x8410;
 static constexpr uint16_t C_DARK   = 0x2104;
+
+// The DIN Meter window hides a few pixels on the physical left edge.
+// Primary performance/config UI is inset slightly so labels and tabs remain
+// fully visible while preserving the existing right edge.
+static constexpr int PRIMARY_UI_X_OFFSET = 3;
 
 // ======================================================================
 // Preset data
@@ -1292,7 +1297,7 @@ void onMidiDeviceDisconnected() {
 void armPickupForCurrentContext();
 void updateByteLeds();
 void openSaveDialog();
-void drawHazardStripe(int y, int h);
+void drawHazardStripe(int y, int h, int x0 = 0, int width = -1);
 void clearScreen();
 void resetMaintenanceUiCache();
 void enterUsbFlashBootloader();
@@ -2944,13 +2949,17 @@ void pollEncoderButton() {
 // Screen drawing
 // ======================================================================
 
-void drawHazardStripe(int y, int h) {
-  int w = M5.Display.width();
-  M5.Display.fillRect(0, y, w, h, C_YELLOW);
-  for (int x = -h; x < w + h; x += 14) {
-    M5.Display.drawLine(x, y + h - 1, x + h, y, C_BLACK);
-    M5.Display.drawLine(x + 1, y + h - 1, x + h + 1, y, C_BLACK);
-    M5.Display.drawLine(x + 2, y + h - 1, x + h + 2, y, C_BLACK);
+void drawHazardStripe(int y, int h, int x0, int width) {
+  int screenW = M5.Display.width();
+  if (width < 0) width = screenW - x0;
+  if (width <= 0) return;
+
+  M5.Display.fillRect(x0, y, width, h, C_YELLOW);
+  int xEnd = x0 + width;
+  for (int x = x0; x < xEnd; x += 14) {
+    M5.Display.drawLine(x, y + h - 1, min(x + h, xEnd - 1), y, C_BLACK);
+    M5.Display.drawLine(x + 1, y + h - 1, min(x + h + 1, xEnd - 1), y, C_BLACK);
+    M5.Display.drawLine(x + 2, y + h - 1, min(x + h + 2, xEnd - 1), y, C_BLACK);
   }
 }
 
@@ -3435,7 +3444,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.9.4");
+  M5.Display.print("FW          : v1.9.5");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -3489,7 +3498,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.9.4  LATEST ");
+    M5.Display.print("FW v1.9.5  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -3608,17 +3617,19 @@ void drawParamPopup() {
 void drawPerformanceScreen() {
   clearScreen();
   int w = M5.Display.width();
-  int cellW = w / 8;
+  const int x0 = PRIMARY_UI_X_OFFSET;
+  const int contentW = w - x0;
+  const int cellW = contentW / 8;
 
-  drawHazardStripe(0, 8);
+  drawHazardStripe(0, 8, x0, contentW);
 
   // Top status
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(C_YELLOW, C_BLACK);
-  M5.Display.setCursor(6, 13);
+  M5.Display.setCursor(x0 + 6, 13);
   M5.Display.printf("B%u", browseBank + 1);
 
-  M5.Display.setCursor(34, 13);
+  M5.Display.setCursor(x0 + 34, 13);
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.printf("P%u", loadedSlot);
 
@@ -3633,18 +3644,17 @@ void drawPerformanceScreen() {
   }
 
   // Preset name
-  M5.Display.drawRect(5, 27, w - 10, 30, C_AMBER);
+  M5.Display.drawRect(x0 + 5, 27, contentW - 10, 30, C_AMBER);
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(2);
-  M5.Display.setCursor(10, 35);
+  M5.Display.setCursor(x0 + 10, 35);
   M5.Display.printf("%.18s", currentPreset.name);
 
   // 8Angle assignment labels - always visible in PERFORMANCE
   M5.Display.setTextSize(1);
   for (uint8_t i = 0; i < 8; ++i) {
-    int x = i * cellW;
+    int x = x0 + i * cellW;
 
-    // cell separator
     if (i > 0) {
       M5.Display.drawLine(x, 65, x, 102, C_DARK);
     }
@@ -3657,7 +3667,6 @@ void drawPerformanceScreen() {
     formatParamValue(PAGE_PERF, i, v, sizeof(v));
 
     if (i == 6) {
-      // PORTAMENTO is a left/right physical switch-like control.
       M5.Display.setTextColor(currentPreset.glide ? C_GREEN : C_GREY, C_BLACK);
       M5.Display.setCursor(x + 4, 84);
       M5.Display.print(currentPreset.glide ? "ON" : "OFF");
@@ -3668,22 +3677,22 @@ void drawPerformanceScreen() {
     }
   }
 
-  M5.Display.drawLine(0, 105, w, 105, C_AMBER);
+  M5.Display.drawLine(x0, 105, w - 1, 105, C_AMBER);
 
   // Bottom status
   M5.Display.setTextColor(currentPreset.mono ? C_YELLOW : C_GREY, C_BLACK);
-  M5.Display.setCursor(6, 111);
+  M5.Display.setCursor(x0 + 6, 111);
   M5.Display.print(currentPreset.mono ? "MONO" : "POLY");
 
   M5.Display.setTextColor(currentPreset.glide ? C_GREEN : C_GREY, C_BLACK);
-  M5.Display.setCursor(48, 111);
+  M5.Display.setCursor(x0 + 48, 111);
   M5.Display.print(currentPreset.glide ? "PORT ON" : "PORT OFF");
 
   M5.Display.setTextColor(C_GREY, C_BLACK);
-  M5.Display.setCursor(115, 111);
+  M5.Display.setCursor(x0 + 115, 111);
   M5.Display.print("ENC=BANK");
 
-  M5.Display.setCursor(6, 123);
+  M5.Display.setCursor(x0 + 6, 123);
   M5.Display.print("BYTE=PRESET   HOLD ENC=SAVE");
 }
 
@@ -3737,15 +3746,19 @@ void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
 
 void drawPageTabs() {
   int w = M5.Display.width();
-  int tabW = w / PAGE_COUNT;
+  const int x0 = PRIMARY_UI_X_OFFSET;
+  const int contentW = w - x0;
+  const int tabW = contentW / PAGE_COUNT;
 
   for (uint8_t i = 0; i < PAGE_COUNT; ++i) {
-    int x = i * tabW;
+    int x = x0 + i * tabW;
+    int width = (i == PAGE_COUNT - 1) ? (w - x) : (tabW - 1);
+
     if (i == configPage) {
-      M5.Display.fillRect(x, 0, tabW - 1, 16, C_YELLOW);
+      M5.Display.fillRect(x, 0, width, 16, C_YELLOW);
       M5.Display.setTextColor(C_BLACK, C_YELLOW);
     } else {
-      M5.Display.drawRect(x, 0, tabW - 1, 16, C_DARK);
+      M5.Display.drawRect(x, 0, width, 16, C_DARK);
       M5.Display.setTextColor(C_GREY, C_BLACK);
     }
     M5.Display.setTextSize(1);
@@ -3757,23 +3770,25 @@ void drawPageTabs() {
 void drawConfigScreen() {
   clearScreen();
   int w = M5.Display.width();
+  const int x0 = PRIMARY_UI_X_OFFSET;
+  const int contentW = w - x0;
 
   drawPageTabs();
 
   M5.Display.setTextColor(C_YELLOW, C_BLACK);
   M5.Display.setTextSize(1);
-  M5.Display.setCursor(5, 20);
+  M5.Display.setCursor(x0 + 5, 20);
   M5.Display.printf("CONFIG // %s", PAGE_NAMES[configPage]);
 
-  drawHazardStripe(34, 6);
+  drawHazardStripe(34, 6, x0, contentW);
 
   const char** labels = labelsForPage(configPage);
-  int cellW = w / 8;
+  const int cellW = contentW / 8;
 
   // 8Angle row
   M5.Display.setTextSize(1);
   for (uint8_t i = 0; i < 8; ++i) {
-    int x = i * cellW;
+    int x = x0 + i * cellW;
     M5.Display.setTextColor(C_AMBER, C_BLACK);
     M5.Display.setCursor(x + 2, 44);
     M5.Display.print(labels[i]);
@@ -3785,7 +3800,7 @@ void drawConfigScreen() {
     M5.Display.print(v);
   }
 
-  M5.Display.drawLine(0, 76, w, 76, C_AMBER);
+  M5.Display.drawLine(x0, 76, w - 1, 76, C_AMBER);
 
   // ByteButton row
   bool btnStates[7] = {
@@ -3799,7 +3814,7 @@ void drawConfigScreen() {
   };
 
   for (uint8_t i = 0; i < 8; ++i) {
-    int x = i * cellW;
+    int x = x0 + i * cellW;
 
     M5.Display.setTextColor(C_AMBER, C_BLACK);
     M5.Display.setCursor(x + 2, 83);
@@ -3818,15 +3833,15 @@ void drawConfigScreen() {
 
   if (modified) {
     M5.Display.setTextColor(C_RED, C_BLACK);
-    M5.Display.setCursor(5, 117);
+    M5.Display.setCursor(x0 + 5, 117);
     M5.Display.print("* MODIFIED");
   } else {
     M5.Display.setTextColor(C_GREY, C_BLACK);
-    M5.Display.setCursor(5, 117);
+    M5.Display.setCursor(x0 + 5, 117);
     M5.Display.print("ENC=PAGE   HOLD=SAVE");
   }
 
-  drawHazardStripe(128, 7);
+  drawHazardStripe(128, 7, x0, contentW);
 }
 
 bool maintenanceUiChanged() {
@@ -4024,7 +4039,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.4");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.5");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -4074,7 +4089,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.4
+  Version: v1.9.5
   END
   ======================================================================
 */

@@ -863,3 +863,12 @@ MONO + GLIDE + LEGATO:
 DinMeter owns the mono voice whenever GLIDE or LEGATO is active. SAM2695 native
 mono/portamento remains bypassed for those combinations to avoid the previous
 large overlapping-NoteOn transient.
+
+
+v1.9.5 primary UI alignment
+---------------------------
+- PERFORMANCE and CONFIG screens are inset 3 px from the physical left edge.
+- The usable width is reduced by the same amount so the right edge stays within
+  the display window.
+- Top tabs, parameter columns, status text, separators and hazard stripes now
+  share the same inset.

@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.7
+  Version: v1.9.8
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -34,7 +34,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.9.7";
+  "DINMETER_FW_VERSION=v1.9.8";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -184,7 +184,6 @@ uint8_t loadedSlot  = 0;  // 0..7
 bool modified       = false;
 
 uint8_t masterVolume = 100;
-uint8_t keyboardVolume = 127;  // incoming MIDI CC7, multiplied with panel master
 
 // Runtime-only states
 bool keyboardSustain = false;
@@ -467,12 +466,8 @@ static constexpr uint8_t LIVE_FILTER_CC = 16;  // reserved inside DinMeter
 // Defined in General helpers below.
 uint8_t oscEffectiveCutoff(uint8_t oscIndex);
 
-uint8_t effectiveMasterVolume() {
-  return (uint8_t)(((uint16_t)masterVolume * (uint16_t)keyboardVolume + 63) / 127);
-}
-
 void applyMasterVolume() {
-  synth.setMasterVolume(effectiveMasterVolume());
+  synth.setMasterVolume(masterVolume);
 }
 
 void sendGsPartParameter(uint8_t ch, uint8_t addressBlock, uint8_t parameter, uint8_t value) {
@@ -1265,6 +1260,11 @@ void forwardCCToOscs(uint8_t cc, uint8_t value) {
   }
 }
 
+// Used by incoming MIDI CC7 so the keyboard controls the same VOLUME state
+// and UI path as the PERFORMANCE 8Angle volume knob.
+void popupNumber(const char* name, int value);
+void updatePickupLed(uint8_t knob);
+
 void onMidiMessage(const uint8_t (&packet)[4]) {
   uint8_t cin = packet[0] & 0x0F;
 
@@ -1304,10 +1304,19 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
     }
 
     if (cc == 7) {
-      // Preserve the DinMeter panel volume as the local master, while allowing
-      // the keyboard's volume control to scale the final output.
-      keyboardVolume = value;
+      // Keyboard CC7 and PERFORMANCE 8Angle VOL are the same logical control.
+      // Update the shared value so both sound and on-screen VOL follow CC7.
+      masterVolume = value;
       applyMasterVolume();
+
+      // The physical knob may now be at a different position. Re-arm pickup
+      // only for VOL so touching the knob does not cause an abrupt jump.
+      pickup[0].target = masterVolume;
+      pickup[0].active = false;
+      updatePickupLed(0);
+
+      popupNumber("VOLUME", masterVolume);
+      screenDirty = true;
       return;
     }
 
@@ -3524,7 +3533,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.9.7");
+  M5.Display.print("FW          : v1.9.8");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -3578,7 +3587,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.9.7  LATEST ");
+    M5.Display.print("FW v1.9.8  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -4119,7 +4128,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.7");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.8");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -4169,7 +4178,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.7
+  Version: v1.9.8
   END
   ======================================================================
 */

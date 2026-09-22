@@ -678,3 +678,18 @@ Fixed an extra closing brace in the generated findAscii() JavaScript function.
 The syntax error prevented the firmware file change handler from running, so
 the browser showed the selected filename but SELECTED/ACTION stayed unchanged.
 The server-side OTA endpoints were unaffected.
+
+
+v1.8.6 browser update paths
+----------------------------
+MAINTENANCE now keeps all three firmware recovery/update paths:
+
+1. GitHub Release self-update from the DinMeter screen.
+2. GitHub Release update from the maintenance browser page.
+3. Manual browser .bin upload as an independent fallback.
+
+USB FLASH remains the final wired recovery path.
+
+The browser GitHub section shows CURRENT / LATEST / STATUS and provides
+CHECK GITHUB and UPDATE FROM GITHUB buttons. Manual upload remains separate
+and unchanged below it.

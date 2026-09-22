@@ -3,11 +3,21 @@ name: Build DinMeter firmware
 on:
   push:
     branches: [main]
+    paths:
+      - "DinMeter_Synth_v1.ino"
+      - "*.cpp"
+      - "*.h"
+      - ".github/workflows/build-firmware.yml"
   pull_request:
+    paths:
+      - "DinMeter_Synth_v1.ino"
+      - "*.cpp"
+      - "*.h"
+      - ".github/workflows/build-firmware.yml"
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -49,6 +59,18 @@ jobs:
           git clone --depth 1 https://github.com/enudenki/esp32-usb-host-midi-library.git /tmp/omocha
           find /tmp/omocha/src -maxdepth 1 -type f \( -name "*.cpp" -o -name "*.h" \) -exec cp {} ci-sketch/DinMeter_Synth_v1/ \;
 
+      - name: Read firmware version
+        id: firmware
+        shell: bash
+        run: |
+          VERSION=$(grep -oE 'DINMETER_FW_VERSION=v[0-9]+\.[0-9]+\.[0-9]+' SynthApp.cpp | head -n 1 | cut -d= -f2)
+          if [ -z "$VERSION" ]; then
+            echo "Firmware version marker not found."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Firmware version: $VERSION"
+
       - name: Compile firmware
         run: |
           mkdir -p build
@@ -58,16 +80,38 @@ jobs:
             --warnings all \
             ci-sketch/DinMeter_Synth_v1
 
+      - name: Verify compiled firmware marker
+        run: |
+          grep -a -q "DINMETER_FW_VERSION=${{ steps.firmware.outputs.version }}" build/DinMeter_Synth_v1.ino.bin
+          echo "Verified ${{ steps.firmware.outputs.version }} marker in firmware binary."
+
       - name: Show build outputs
         run: ls -lah build
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dinmeter-firmware-${{ github.sha }}
+          name: dinmeter-firmware-${{ steps.firmware.outputs.version }}-${{ github.sha }}
           path: |
             build/*.bin
             build/*.elf
             build/*.map
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.firmware.outputs.version }}
+        run: |
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "Release $VERSION already exists; leaving it unchanged."
+          else
+            cp build/DinMeter_Synth_v1.ino.bin "DinMeter_Synth_firmware.bin"
+            gh release create "$VERSION" \
+              "DinMeter_Synth_firmware.bin" \
+              --title "DinMeter Synth $VERSION" \
+              --generate-notes \
+              --target "${{ github.sha }}"
+          fi

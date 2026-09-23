@@ -2178,16 +2178,6 @@ uint8_t currentParamAs127(uint8_t knob) {
     }
   }
 
-  if (page == PAGE_GM) {
-    switch (knob) {
-      case 0: snprintf(out, n, "%03u", currentGmLayer.program + 1); return;
-      case 1: snprintf(out, n, "%u", currentGmLayer.level); return;
-      case 2: snprintf(out, n, "%+d", currentGmLayer.transpose / 12); return;
-      case 3: snprintf(out, n, "%u", currentGmLayer.pan); return;
-      default: snprintf(out, n, "-"); return;
-    }
-  }
-
   if (page == PAGE_ENV) {
     const EnvelopeState& env = currentPreset.env[selectedEnv];
     switch (knob) {
@@ -4756,6 +4746,16 @@ void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
       page == PAGE_VOICE_ENV || page == PAGE_MOD) {
     snprintf(out, n, "%u", currentParamAs127(knob));
     return;
+  }
+
+  if (page == PAGE_GM) {
+    switch (knob) {
+      case 0: snprintf(out, n, "%03u", currentGmLayer.program + 1); return;
+      case 1: snprintf(out, n, "%u", currentGmLayer.level); return;
+      case 2: snprintf(out, n, "%+d", currentGmLayer.transpose / 12); return;
+      case 3: snprintf(out, n, "%u", currentGmLayer.pan); return;
+      default: snprintf(out, n, "-"); return;
+    }
   }
 
   if (page == PAGE_ENV) {

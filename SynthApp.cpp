@@ -1758,6 +1758,9 @@ void clearHeldState() {
   currentMonoNote = -1;
   monoAnchorNote = -1;
   monoTargetNote = -1;
+  configAuditionEnabled = false;
+  configAuditionNoteOn = false;
+  configAuditionStep = 0;
   resetSoftwareBend(false);
   resetModulationRuntime();
 }

@@ -2159,11 +2159,10 @@ uint8_t currentParamAs127(uint8_t knob) {
     }
   }
 
-  if (page >= PAGE_OSC1 && page <= PAGE_OSC3) {
-    uint8_t oi = page - PAGE_OSC1;
-    const OscState& o = currentPreset.osc[oi];
+  if (page == PAGE_OSC) {
+    const OscState& o = currentPreset.osc[selectedOsc];
     switch (knob) {
-      case 0: return (uint8_t)((waveIndexForOsc(oi) * 127) / 7);
+      case 0: return (uint8_t)((waveIndexForOsc(selectedOsc) * 127) / 7);
       case 1: return o.level;
       case 2: return mapSignedTo127(o.transpose, -48, 48);
       case 3: return mapSignedTo127(o.detune, -50, 50);
@@ -2184,6 +2183,19 @@ uint8_t currentParamAs127(uint8_t knob) {
     }
   }
 
+  if (page == PAGE_LFO) {
+    const LfoState& lfo = currentPreset.lfo[selectedLfo];
+    switch (knob) {
+      case 0: snprintf(out, n, "%s", lfoWaveLabel(lfo.waveform)); return;
+      case 1: snprintf(out, n, "%u", lfo.rate); return;
+      case 2: snprintf(out, n, "%u", lfo.delay); return;
+      case 3: snprintf(out, n, "%u", lfo.fade); return;
+      case 4: snprintf(out, n, "%s", lfo.retrigger ? "ON" : "--"); return;
+      case 5: snprintf(out, n, "%u", lfo.phase); return;
+      default: snprintf(out, n, "-"); return;
+    }
+  }
+
   if (page == PAGE_ENV) {
     const EnvelopeState& env = currentPreset.env[selectedEnv];
     switch (knob) {
@@ -2197,12 +2209,25 @@ uint8_t currentParamAs127(uint8_t knob) {
     }
   }
 
+  if (page == PAGE_LFO) {
+    const LfoState& lfo = currentPreset.lfo[selectedLfo];
+    switch (knob) {
+      case 0: return (uint8_t)((min((int)lfo.waveform, 5) * 127) / 5);
+      case 1: return lfo.rate;
+      case 2: return lfo.delay;
+      case 3: return lfo.fade;
+      case 4: return lfo.retrigger ? 127 : 0;
+      case 5: return lfo.phase;
+      default: return 0;
+    }
+  }
+
   if (page == PAGE_ROUTE) {
     const ModRoute& route = currentPreset.routes[selectedRoute];
     switch (knob) {
       case 0: {
-        uint8_t src = (route.source <= MODSRC_ENV3) ? route.source : (uint8_t)MODSRC_NONE;
-        return (uint8_t)(((uint16_t)src * 127) / MODSRC_ENV3);
+        uint8_t src = (route.source <= MODSRC_LFO3) ? route.source : (uint8_t)MODSRC_NONE;
+        return (uint8_t)(((uint16_t)src * 127) / MODSRC_LFO3);
       }
       case 1: return route.destination == MODDST_CUTOFF ? 127 : 0;
       case 2: return mapSignedTo127(route.amount, -127, 127);
@@ -2232,9 +2257,10 @@ bool knobIsReserved(uint8_t knob) {
 
   if (page == PAGE_FILTER_ENV) return knob >= 5;
   if (page == PAGE_VOICE_ENV) return knob >= 3;
-  if (page >= PAGE_OSC1 && page <= PAGE_OSC3) return knob == 7;
+  if (page == PAGE_OSC) return knob == 7;
   if (page == PAGE_GM) return knob >= 4;
   if (page == PAGE_ENV) return knob >= 6;
+  if (page == PAGE_LFO) return knob >= 6;
   if (page == PAGE_ROUTE) return knob >= 4;
 
   return false;
@@ -2524,8 +2550,8 @@ void applyVoiceEnvPageKnob(uint8_t knob, uint8_t v) {
   }
 }
 
-void applyOscPageKnob(uint8_t page, uint8_t knob, uint8_t v) {
-  uint8_t oi = page - PAGE_OSC1;
+void applyOscPageKnob(uint8_t knob, uint8_t v) {
+  uint8_t oi = selectedOsc;
   OscState& o = currentPreset.osc[oi];
   bool changed = false;
 
@@ -2722,14 +2748,50 @@ void applyEnvPageKnob(uint8_t knob, uint8_t v) {
   if (changed) markModified();
 }
 
+void applyLfoPageKnob(uint8_t knob, uint8_t v) {
+  LfoState& lfo = currentPreset.lfo[selectedLfo];
+  bool changed = false;
+
+  switch (knob) {
+    case 0: {
+      uint8_t wave = (uint8_t)(((uint16_t)v * 6) / 128);
+      if (wave > LFO_WAVE_RANDOM) wave = LFO_WAVE_RANDOM;
+      changed = lfo.waveform != wave;
+      lfo.waveform = wave;
+      break;
+    }
+    case 1: changed = lfo.rate != v;  lfo.rate = v; break;
+    case 2: changed = lfo.delay != v; lfo.delay = v; break;
+    case 3: changed = lfo.fade != v;  lfo.fade = v; break;
+    case 4: {
+      uint8_t retrigger = v >= 64 ? 1 : 0;
+      changed = lfo.retrigger != retrigger;
+      lfo.retrigger = retrigger;
+      break;
+    }
+    case 5:
+      changed = lfo.phase != v;
+      lfo.phase = v;
+      break;
+    default:
+      return;
+  }
+
+  if (changed) {
+    markModified();
+    resetModulationRuntime();
+    sendLiveCutoffAll();
+  }
+}
+
 void applyRoutePageKnob(uint8_t knob, uint8_t v) {
   ModRoute& route = currentPreset.routes[selectedRoute];
   bool changed = false;
 
   switch (knob) {
     case 0: {
-      uint8_t source = (uint8_t)(((uint16_t)v * 4) / 128);
-      if (source > MODSRC_ENV3) source = MODSRC_ENV3;
+      uint8_t source = (uint8_t)(((uint16_t)v * 7) / 128);
+      if (source > MODSRC_LFO3) source = MODSRC_LFO3;
       changed = route.source != source;
       route.source = source;
       break;
@@ -2775,12 +2837,14 @@ void applyKnobValue(uint8_t knob, uint8_t value) {
     applyFilterPageKnob(knob, value);
   } else if (page == PAGE_VOICE_ENV) {
     applyVoiceEnvPageKnob(knob, value);
-  } else if (page >= PAGE_OSC1 && page <= PAGE_OSC3) {
-    applyOscPageKnob(page, knob, value);
+  } else if (page == PAGE_OSC) {
+    applyOscPageKnob(knob, value);
   } else if (page == PAGE_GM) {
     applyGmPageKnob(knob, value);
   } else if (page == PAGE_ENV) {
     applyEnvPageKnob(knob, value);
+  } else if (page == PAGE_LFO) {
+    applyLfoPageKnob(knob, value);
   } else if (page == PAGE_ROUTE) {
     applyRoutePageKnob(knob, value);
   } else if (page == PAGE_MOD) {
@@ -4725,9 +4789,10 @@ const char** labelsForPage(uint8_t page) {
   if (page == PAGE_PERF) return PERF_LABELS;
   if (page == PAGE_FILTER_ENV) return FILTER_LABELS;
   if (page == PAGE_VOICE_ENV) return VOICE_ENV_LABELS;
-  if (page >= PAGE_OSC1 && page <= PAGE_OSC3) return OSC_LABELS;
+  if (page == PAGE_OSC) return OSC_LABELS;
   if (page == PAGE_GM) return GM_LABELS;
   if (page == PAGE_ENV) return ENV_LABELS;
+  if (page == PAGE_LFO) return LFO_LABELS;
   if (page == PAGE_ROUTE) return ROUTE_LABELS;
   return MOD_LABELS;
 }
@@ -4743,7 +4808,22 @@ const char* routeSourceLabel(uint8_t source) {
     case MODSRC_ENV1: return "E1";
     case MODSRC_ENV2: return "E2";
     case MODSRC_ENV3: return "E3";
+    case MODSRC_LFO1: return "L1";
+    case MODSRC_LFO2: return "L2";
+    case MODSRC_LFO3: return "L3";
     default: return "---";
+  }
+}
+
+const char* lfoWaveLabel(uint8_t waveform) {
+  switch (waveform) {
+    case LFO_WAVE_SINE: return "SIN";
+    case LFO_WAVE_TRIANGLE: return "TRI";
+    case LFO_WAVE_SAW_UP: return "SAW+";
+    case LFO_WAVE_SAW_DOWN: return "SAW-";
+    case LFO_WAVE_SQUARE: return "SQR";
+    case LFO_WAVE_RANDOM: return "RND";
+    default: return "SIN";
   }
 }
 
@@ -4788,8 +4868,8 @@ void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
     }
   }
 
-  if (page >= PAGE_OSC1 && page <= PAGE_OSC3) {
-    uint8_t oi = page - PAGE_OSC1;
+  if (page == PAGE_OSC) {
+    uint8_t oi = selectedOsc;
     const OscState& o = currentPreset.osc[oi];
 
     switch (knob) {

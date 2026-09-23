@@ -978,3 +978,17 @@ v1.10.2 separate VOICE ENV from MOD ENV
   envelope values. It keeps CUT / RES / REV / vibrato rate / vibrato depth.
 - Freshly migrated modular ENV1 no longer copies the voice-envelope timing;
   it starts as an independent short LOG contour suitable for filter routing.
+
+
+v1.10.3 GM browser + preset recovery
+------------------------------------
+- Adds a GM BROWSER CONFIG page for the standard bank-0 GM programs 1..128.
+- Encoder short press cycles the target OSC1 / OSC2 / OSC3.
+- GM page exposes program, level, octave, detune, cutoff trim, resonance trim
+  and pan. Selecting a GM program sets that oscillator to bank 0.
+- The display shows the GM program number and a compact instrument name.
+- OSC octave range is widened from +/-2 octaves to +/-4 octaves.
+- Factory presets 0..59 are protected from a known stale-NVS failure mode:
+  if a saved factory-named preset has all three OSC levels at zero, the
+  in-memory load falls back to the built-in factory definition.
+- PERFORMANCE preset numbering now displays P1..P8 to match ByteButton labels.

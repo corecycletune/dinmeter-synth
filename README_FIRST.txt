@@ -1027,3 +1027,19 @@ v1.10.5 mixable GM layer + named GM bank
   in the PERFORMANCE bank indicator and bank-selection overlay.
 - The GM layer follows note priority, sustain, expression, aftertouch,
   pitch bend and DinMeter software mono/glide behavior.
+
+
+v1.10.6 LFO routing + unified OSC page
+---------------------------------------
+- Implements three ESP32-side LFOs as real modular sources.
+- CONFIG now has one OSC page; encoder short press cycles OSC1/OSC2/OSC3.
+- Adds an LFO page; encoder short press cycles LFO1/LFO2/LFO3.
+- LFO parameters: waveform, rate, delay, fade, retrigger and start phase.
+- Waveforms: sine, triangle, saw up, saw down, square and random/S&H.
+- LFO rate uses an exponential 0.05..8 Hz range. Delay/fade map to 0..5 s.
+- ROUTE SRC now offers ENV1..3 and LFO1..3. The verified live destination in
+  this release remains CUTOFF.
+- LFO is bipolar, so positive route amount sweeps above/below base cutoff;
+  a negative amount inverts the modulation.
+- LFO and ENV sums are calculated inside ESP32 first; SAM2695 still receives
+  only the final rate-limited cutoff value.

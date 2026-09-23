@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.5
+  Version: v1.10.6
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -29,13 +29,14 @@
 #include <Wire.h>
 #include <Preferences.h>
 #include <stddef.h>
+#include <math.h>
 #include <esp_system.h>
 #include "esp32-hal-tinyusb.h"
 
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.5";
+  "DINMETER_FW_VERSION=v1.10.6";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -397,11 +398,10 @@ enum ConfigPage : uint8_t {
   PAGE_PERF = 0,
   PAGE_FILTER_ENV,
   PAGE_VOICE_ENV,
-  PAGE_OSC1,
-  PAGE_OSC2,
-  PAGE_OSC3,
+  PAGE_OSC,
   PAGE_GM,
   PAGE_ENV,
+  PAGE_LFO,
   PAGE_ROUTE,
   PAGE_MOD,
   PAGE_COUNT
@@ -409,16 +409,18 @@ enum ConfigPage : uint8_t {
 
 uint8_t configPage = PAGE_PERF;
 bool configMode = false;
+uint8_t selectedOsc = 0;
 uint8_t selectedEnv = 0;
+uint8_t selectedLfo = 0;
 uint8_t selectedRoute = 0;
 
 static const char* PAGE_NAMES[PAGE_COUNT] = {
-  "PERFORMANCE", "TONE / FX", "VOICE ENV", "OSC 1", "OSC 2", "OSC 3",
-  "GM LAYER", "MOD ENV", "ROUTE", "MOD"
+  "PERFORMANCE", "TONE / FX", "VOICE ENV", "OSC",
+  "GM LAYER", "MOD ENV", "LFO", "ROUTE", "MOD"
 };
 
 static const char* PAGE_TAB[PAGE_COUNT] = {
-  "PF", "TN", "VN", "O1", "O2", "O3", "GM", "EN", "RT", "MD"
+  "PF", "TN", "VN", "OS", "GM", "EN", "LF", "RT", "MD"
 };
 
 static const char* PERF_LABELS[8] = {
@@ -443,6 +445,10 @@ static const char* GM_LABELS[8] = {
 
 static const char* ENV_LABELS[8] = {
   "ATK", "DEC", "SUS", "REL", "CUR", "RTR", "---", "---"
+};
+
+static const char* LFO_LABELS[8] = {
+  "WAV", "RATE", "DLY", "FADE", "RTR", "PHS", "---", "---"
 };
 
 static const char* ROUTE_LABELS[8] = {
@@ -488,17 +494,45 @@ struct EnvRuntime {
   uint32_t stageStartedAt;
 };
 
+struct LfoRuntime {
+  float phase;          // 0.0 .. <1.0
+  float value;          // bipolar -1.0 .. +1.0 after delay/fade
+  float randomValue;    // held value for S&H/random waveform
+  uint32_t lastUpdatedAt;
+  uint32_t triggeredAt;
+  bool active;
+};
+
 EnvRuntime envRuntime[ENV_COUNT] = {};
+LfoRuntime lfoRuntime[LFO_COUNT] = {};
 uint32_t lastModOutputAt = 0;
 static constexpr uint32_t MOD_OUTPUT_INTERVAL_MS = 24; // ~42 Hz max GS updates
 
+void resetLfoRuntime() {
+  uint32_t nowMs = millis();
+
+  for (uint8_t i = 0; i < LFO_COUNT; ++i) {
+    lfoRuntime[i].phase = (float)currentPreset.lfo[i].phase / 128.0f;
+    lfoRuntime[i].value = 0.0f;
+    lfoRuntime[i].randomValue =
+        ((float)(esp_random() & 0xFFFF) / 32767.5f) - 1.0f;
+    lfoRuntime[i].lastUpdatedAt = nowMs;
+    lfoRuntime[i].triggeredAt = 0;
+    lfoRuntime[i].active = false;
+  }
+}
+
 void resetModulationRuntime() {
+  uint32_t nowMs = millis();
+
   for (uint8_t i = 0; i < ENV_COUNT; ++i) {
     envRuntime[i].stage = ENV_STAGE_IDLE;
     envRuntime[i].value = 0.0f;
     envRuntime[i].stageStartValue = 0.0f;
-    envRuntime[i].stageStartedAt = millis();
+    envRuntime[i].stageStartedAt = nowMs;
   }
+
+  resetLfoRuntime();
   lastModOutputAt = 0;
 }
 
@@ -772,8 +806,15 @@ int modulationSourceValue(uint8_t source) {
       return constrain((int)(envRuntime[i].value * 127.0f + 0.5f), 0, 127);
     }
 
-    // LFO / velocity / key / controllers are deliberately reserved in the
-    // schema but will be enabled in later v1.10.x stages.
+    case MODSRC_LFO1:
+    case MODSRC_LFO2:
+    case MODSRC_LFO3: {
+      uint8_t i = source - MODSRC_LFO1;
+      if (i >= LFO_COUNT) return 0;
+      return constrain((int)(lfoRuntime[i].value * 127.0f), -127, 127);
+    }
+
+    // Velocity / key / controllers remain reserved for later stages.
     default:
       return 0;
   }
@@ -949,11 +990,113 @@ void updateEnvelopeRuntime(uint8_t i, uint32_t nowMs) {
   }
 }
 
+float lfoRateHz(uint8_t value) {
+  // Exponential musical range. The current GS cutoff transport is rate-limited
+  // to ~42 updates/s, so cap this first implementation at 8 Hz.
+  const float normalized = (float)value / 127.0f;
+  return 0.05f * powf(160.0f, normalized); // 0.05 .. 8.0 Hz
+}
+
+uint32_t lfoTimeMs(uint8_t value) {
+  // Quadratic 0..5000 ms mapping gives useful resolution near zero.
+  if (value == 0) return 0;
+  uint32_t v = value;
+  return (v * v * 5000UL) / (127UL * 127UL);
+}
+
+float lfoWaveValue(uint8_t waveform, float phase, float randomValue) {
+  switch (waveform) {
+    case LFO_WAVE_SINE:
+      return sinf(phase * 2.0f * PI);
+
+    case LFO_WAVE_TRIANGLE:
+      return 1.0f - 4.0f * fabsf(phase - 0.5f);
+
+    case LFO_WAVE_SAW_UP:
+      return phase * 2.0f - 1.0f;
+
+    case LFO_WAVE_SAW_DOWN:
+      return 1.0f - phase * 2.0f;
+
+    case LFO_WAVE_SQUARE:
+      return phase < 0.5f ? 1.0f : -1.0f;
+
+    case LFO_WAVE_RANDOM:
+      return randomValue;
+
+    default:
+      return 0.0f;
+  }
+}
+
+void triggerModLfos(bool phraseStart) {
+  uint32_t nowMs = millis();
+
+  for (uint8_t i = 0; i < LFO_COUNT; ++i) {
+    const LfoState& lfo = currentPreset.lfo[i];
+
+    if (!phraseStart && !lfo.retrigger) continue;
+
+    lfoRuntime[i].active = true;
+    lfoRuntime[i].triggeredAt = nowMs;
+
+    if (lfo.retrigger) {
+      lfoRuntime[i].phase = (float)lfo.phase / 128.0f;
+      lfoRuntime[i].randomValue =
+          ((float)(esp_random() & 0xFFFF) / 32767.5f) - 1.0f;
+    }
+  }
+}
+
+void updateLfoRuntime(uint8_t i, uint32_t nowMs) {
+  if (i >= LFO_COUNT) return;
+
+  LfoRuntime& rt = lfoRuntime[i];
+  const LfoState& lfo = currentPreset.lfo[i];
+
+  uint32_t deltaMs = nowMs - rt.lastUpdatedAt;
+  rt.lastUpdatedAt = nowMs;
+
+  float nextPhase = rt.phase + ((float)deltaMs / 1000.0f) * lfoRateHz(lfo.rate);
+  bool wrapped = nextPhase >= 1.0f;
+
+  if (nextPhase >= 1.0f) {
+    nextPhase -= floorf(nextPhase);
+  }
+  rt.phase = nextPhase;
+
+  if (wrapped && lfo.waveform == LFO_WAVE_RANDOM) {
+    rt.randomValue =
+        ((float)(esp_random() & 0xFFFF) / 32767.5f) - 1.0f;
+  }
+
+  if (!rt.active) {
+    rt.value = 0.0f;
+    return;
+  }
+
+  uint32_t elapsed = nowMs - rt.triggeredAt;
+  uint32_t delayMs = lfoTimeMs(lfo.delay);
+  if (elapsed < delayMs) {
+    rt.value = 0.0f;
+    return;
+  }
+
+  float gain = 1.0f;
+  uint32_t fadeMs = lfoTimeMs(lfo.fade);
+  if (fadeMs > 0) {
+    uint32_t fadeElapsed = elapsed - delayMs;
+    gain = min(1.0f, (float)fadeElapsed / (float)fadeMs);
+  }
+
+  rt.value = lfoWaveValue(lfo.waveform, rt.phase, rt.randomValue) * gain;
+}
+
 bool hasDynamicCutoffRoute() {
   for (uint8_t i = 0; i < MOD_ROUTE_COUNT; ++i) {
     const ModRoute& route = currentPreset.routes[i];
     if (!route.enabled || route.destination != MODDST_CUTOFF) continue;
-    if (route.source >= MODSRC_ENV1 && route.source <= MODSRC_ENV3) return true;
+    if (route.source >= MODSRC_ENV1 && route.source <= MODSRC_LFO3) return true;
   }
   return false;
 }
@@ -963,6 +1106,9 @@ void updateModulationEngine() {
 
   for (uint8_t i = 0; i < ENV_COUNT; ++i) {
     updateEnvelopeRuntime(i, nowMs);
+  }
+  for (uint8_t i = 0; i < LFO_COUNT; ++i) {
+    updateLfoRuntime(i, nowMs);
   }
 
   if (!hasDynamicCutoffRoute()) return;
@@ -1178,7 +1324,7 @@ void initModularDefaults(Preset& p) {
 }
 
 void migrateStoredPresetV1910(const StoredPresetV1910& oldPreset, Preset& out) {
-  // Preset keeps the entire v1.10.5 object as a byte-compatible prefix.
+  // Preset keeps the entire v1.10.6 object as a byte-compatible prefix.
   memcpy(&out, &oldPreset, sizeof(oldPreset));
   initModularDefaults(out);
 }
@@ -1773,6 +1919,7 @@ void handleNoteOn(uint8_t note, uint8_t velocity) {
 
   const bool phraseStart = (heldCount == 1);
   triggerModEnvelopes(phraseStart);
+  triggerModLfos(phraseStart);
 
   if (!currentPreset.mono) {
     sendLayeredNote(0x90, note, velocity);
@@ -2153,11 +2300,10 @@ uint8_t currentParamAs127(uint8_t knob) {
     }
   }
 
-  if (page >= PAGE_OSC1 && page <= PAGE_OSC3) {
-    uint8_t oi = page - PAGE_OSC1;
-    const OscState& o = currentPreset.osc[oi];
+  if (page == PAGE_OSC) {
+    const OscState& o = currentPreset.osc[selectedOsc];
     switch (knob) {
-      case 0: return (uint8_t)((waveIndexForOsc(oi) * 127) / 7);
+      case 0: return (uint8_t)((waveIndexForOsc(selectedOsc) * 127) / 7);
       case 1: return o.level;
       case 2: return mapSignedTo127(o.transpose, -48, 48);
       case 3: return mapSignedTo127(o.detune, -50, 50);
@@ -2191,12 +2337,25 @@ uint8_t currentParamAs127(uint8_t knob) {
     }
   }
 
+  if (page == PAGE_LFO) {
+    const LfoState& lfo = currentPreset.lfo[selectedLfo];
+    switch (knob) {
+      case 0: return (uint8_t)((min((int)lfo.waveform, 5) * 127) / 5);
+      case 1: return lfo.rate;
+      case 2: return lfo.delay;
+      case 3: return lfo.fade;
+      case 4: return lfo.retrigger ? 127 : 0;
+      case 5: return lfo.phase;
+      default: return 0;
+    }
+  }
+
   if (page == PAGE_ROUTE) {
     const ModRoute& route = currentPreset.routes[selectedRoute];
     switch (knob) {
       case 0: {
-        uint8_t src = (route.source <= MODSRC_ENV3) ? route.source : (uint8_t)MODSRC_NONE;
-        return (uint8_t)(((uint16_t)src * 127) / MODSRC_ENV3);
+        uint8_t src = (route.source <= MODSRC_LFO3) ? route.source : (uint8_t)MODSRC_NONE;
+        return (uint8_t)(((uint16_t)src * 127) / MODSRC_LFO3);
       }
       case 1: return route.destination == MODDST_CUTOFF ? 127 : 0;
       case 2: return mapSignedTo127(route.amount, -127, 127);
@@ -2226,9 +2385,10 @@ bool knobIsReserved(uint8_t knob) {
 
   if (page == PAGE_FILTER_ENV) return knob >= 5;
   if (page == PAGE_VOICE_ENV) return knob >= 3;
-  if (page >= PAGE_OSC1 && page <= PAGE_OSC3) return knob == 7;
+  if (page == PAGE_OSC) return knob == 7;
   if (page == PAGE_GM) return knob >= 4;
   if (page == PAGE_ENV) return knob >= 6;
+  if (page == PAGE_LFO) return knob >= 6;
   if (page == PAGE_ROUTE) return knob >= 4;
 
   return false;
@@ -2518,8 +2678,8 @@ void applyVoiceEnvPageKnob(uint8_t knob, uint8_t v) {
   }
 }
 
-void applyOscPageKnob(uint8_t page, uint8_t knob, uint8_t v) {
-  uint8_t oi = page - PAGE_OSC1;
+void applyOscPageKnob(uint8_t knob, uint8_t v) {
+  uint8_t oi = selectedOsc;
   OscState& o = currentPreset.osc[oi];
   bool changed = false;
 
@@ -2716,14 +2876,50 @@ void applyEnvPageKnob(uint8_t knob, uint8_t v) {
   if (changed) markModified();
 }
 
+void applyLfoPageKnob(uint8_t knob, uint8_t v) {
+  LfoState& lfo = currentPreset.lfo[selectedLfo];
+  bool changed = false;
+
+  switch (knob) {
+    case 0: {
+      uint8_t wave = (uint8_t)(((uint16_t)v * 6) / 128);
+      if (wave > LFO_WAVE_RANDOM) wave = LFO_WAVE_RANDOM;
+      changed = lfo.waveform != wave;
+      lfo.waveform = wave;
+      break;
+    }
+    case 1: changed = lfo.rate != v;  lfo.rate = v; break;
+    case 2: changed = lfo.delay != v; lfo.delay = v; break;
+    case 3: changed = lfo.fade != v;  lfo.fade = v; break;
+    case 4: {
+      uint8_t retrigger = v >= 64 ? 1 : 0;
+      changed = lfo.retrigger != retrigger;
+      lfo.retrigger = retrigger;
+      break;
+    }
+    case 5:
+      changed = lfo.phase != v;
+      lfo.phase = v;
+      break;
+    default:
+      return;
+  }
+
+  if (changed) {
+    markModified();
+    resetLfoRuntime();
+    sendLiveCutoffAll();
+  }
+}
+
 void applyRoutePageKnob(uint8_t knob, uint8_t v) {
   ModRoute& route = currentPreset.routes[selectedRoute];
   bool changed = false;
 
   switch (knob) {
     case 0: {
-      uint8_t source = (uint8_t)(((uint16_t)v * 4) / 128);
-      if (source > MODSRC_ENV3) source = MODSRC_ENV3;
+      uint8_t source = (uint8_t)(((uint16_t)v * 7) / 128);
+      if (source > MODSRC_LFO3) source = MODSRC_LFO3;
       changed = route.source != source;
       route.source = source;
       break;
@@ -2769,12 +2965,14 @@ void applyKnobValue(uint8_t knob, uint8_t value) {
     applyFilterPageKnob(knob, value);
   } else if (page == PAGE_VOICE_ENV) {
     applyVoiceEnvPageKnob(knob, value);
-  } else if (page >= PAGE_OSC1 && page <= PAGE_OSC3) {
-    applyOscPageKnob(page, knob, value);
+  } else if (page == PAGE_OSC) {
+    applyOscPageKnob(knob, value);
   } else if (page == PAGE_GM) {
     applyGmPageKnob(knob, value);
   } else if (page == PAGE_ENV) {
     applyEnvPageKnob(knob, value);
+  } else if (page == PAGE_LFO) {
+    applyLfoPageKnob(knob, value);
   } else if (page == PAGE_ROUTE) {
     applyRoutePageKnob(knob, value);
   } else if (page == PAGE_MOD) {
@@ -3815,6 +4013,31 @@ void handleEncoderShortPress() {
     return;
   }
 
+  if (configMode && configPage == PAGE_OSC) {
+    selectedOsc = (selectedOsc + 1) % 3;
+    armPickupForCurrentContext();
+
+    snprintf(overlayTitle, sizeof(overlayTitle), "OSC SELECT");
+    snprintf(overlaySub, sizeof(overlaySub), "OSC %u / 3", selectedOsc + 1);
+    overlayActive = true;
+    overlayUntil = millis() + 500;
+    screenDirty = true;
+    return;
+  }
+
+  if (configMode && configPage == PAGE_LFO) {
+    selectedLfo = (selectedLfo + 1) % LFO_COUNT;
+    armPickupForCurrentContext();
+
+    snprintf(overlayTitle, sizeof(overlayTitle), "LFO SELECT");
+    snprintf(overlaySub, sizeof(overlaySub), "LFO %u / %u",
+             selectedLfo + 1, LFO_COUNT);
+    overlayActive = true;
+    overlayUntil = millis() + 500;
+    screenDirty = true;
+    return;
+  }
+
   if (configMode && configPage == PAGE_VOICE_ENV) {
     currentPreset.attack = 64;
     currentPreset.decay = 64;
@@ -4463,7 +4686,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.5");
+  M5.Display.print("FW          : v1.10.6");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -4517,7 +4740,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.5  LATEST ");
+    M5.Display.print("FW v1.10.6  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -4719,9 +4942,10 @@ const char** labelsForPage(uint8_t page) {
   if (page == PAGE_PERF) return PERF_LABELS;
   if (page == PAGE_FILTER_ENV) return FILTER_LABELS;
   if (page == PAGE_VOICE_ENV) return VOICE_ENV_LABELS;
-  if (page >= PAGE_OSC1 && page <= PAGE_OSC3) return OSC_LABELS;
+  if (page == PAGE_OSC) return OSC_LABELS;
   if (page == PAGE_GM) return GM_LABELS;
   if (page == PAGE_ENV) return ENV_LABELS;
+  if (page == PAGE_LFO) return LFO_LABELS;
   if (page == PAGE_ROUTE) return ROUTE_LABELS;
   return MOD_LABELS;
 }
@@ -4737,7 +4961,22 @@ const char* routeSourceLabel(uint8_t source) {
     case MODSRC_ENV1: return "E1";
     case MODSRC_ENV2: return "E2";
     case MODSRC_ENV3: return "E3";
+    case MODSRC_LFO1: return "L1";
+    case MODSRC_LFO2: return "L2";
+    case MODSRC_LFO3: return "L3";
     default: return "---";
+  }
+}
+
+const char* lfoWaveLabel(uint8_t waveform) {
+  switch (waveform) {
+    case LFO_WAVE_SINE: return "SIN";
+    case LFO_WAVE_TRIANGLE: return "TRI";
+    case LFO_WAVE_SAW_UP: return "SAW+";
+    case LFO_WAVE_SAW_DOWN: return "SAW-";
+    case LFO_WAVE_SQUARE: return "SQR";
+    case LFO_WAVE_RANDOM: return "RND";
+    default: return "SIN";
   }
 }
 
@@ -4754,6 +4993,19 @@ void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
       case 1: snprintf(out, n, "%u", currentGmLayer.level); return;
       case 2: snprintf(out, n, "%+d", currentGmLayer.transpose / 12); return;
       case 3: snprintf(out, n, "%u", currentGmLayer.pan); return;
+      default: snprintf(out, n, "-"); return;
+    }
+  }
+
+  if (page == PAGE_LFO) {
+    const LfoState& lfo = currentPreset.lfo[selectedLfo];
+    switch (knob) {
+      case 0: snprintf(out, n, "%s", lfoWaveLabel(lfo.waveform)); return;
+      case 1: snprintf(out, n, "%u", lfo.rate); return;
+      case 2: snprintf(out, n, "%u", lfo.delay); return;
+      case 3: snprintf(out, n, "%u", lfo.fade); return;
+      case 4: snprintf(out, n, "%s", lfo.retrigger ? "ON" : "--"); return;
+      case 5: snprintf(out, n, "%u", lfo.phase); return;
       default: snprintf(out, n, "-"); return;
     }
   }
@@ -4782,8 +5034,8 @@ void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
     }
   }
 
-  if (page >= PAGE_OSC1 && page <= PAGE_OSC3) {
-    uint8_t oi = page - PAGE_OSC1;
+  if (page == PAGE_OSC) {
+    uint8_t oi = selectedOsc;
     const OscState& o = currentPreset.osc[oi];
 
     switch (knob) {
@@ -4852,12 +5104,16 @@ void drawConfigScreen() {
   M5.Display.setTextSize(1);
   M5.Display.setCursor(x0 + 5, 20);
 
-  if (configPage == PAGE_GM) {
+  if (configPage == PAGE_OSC) {
+    M5.Display.printf("CONFIG // OSC %u/3", selectedOsc + 1);
+  } else if (configPage == PAGE_GM) {
     M5.Display.printf("GM %03u %.11s",
                       currentGmLayer.program + 1,
                       gmProgramName(currentGmLayer.program));
   } else if (configPage == PAGE_ENV) {
     M5.Display.printf("CONFIG // ENV %u/%u", selectedEnv + 1, ENV_COUNT);
+  } else if (configPage == PAGE_LFO) {
+    M5.Display.printf("CONFIG // LFO %u/%u", selectedLfo + 1, LFO_COUNT);
   } else if (configPage == PAGE_ROUTE) {
     M5.Display.printf("CONFIG // ROUTE %02u/%02u",
                       selectedRoute + 1, MOD_ROUTE_COUNT);
@@ -4925,7 +5181,8 @@ void drawConfigScreen() {
     M5.Display.setCursor(x0 + 5, 117);
     if (configPage == PAGE_VOICE_ENV) {
       M5.Display.print("PUSH=NEUTRAL  ENC=PAGE");
-    } else if (configPage == PAGE_ENV || configPage == PAGE_ROUTE) {
+    } else if (configPage == PAGE_OSC || configPage == PAGE_ENV ||
+               configPage == PAGE_LFO || configPage == PAGE_ROUTE) {
       M5.Display.print("PUSH=NEXT   ENC=PAGE");
     } else {
       M5.Display.print("ENC=PAGE   HOLD=SAVE");
@@ -5131,7 +5388,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.5");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.6");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -5182,7 +5439,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.5
+  Version: v1.10.6
   END
   ======================================================================
 */

@@ -962,3 +962,19 @@ v1.10.1 first virtual patch cable: ENV -> CUTOFF
 - CONFIG now has ENV and ROUTE pages. Encoder short press selects ENV 1..3 or
   ROUTE 01..16; encoder rotation still changes the main page.
 - Existing legacy FILTER/ENV and MOD pages remain available during migration.
+
+
+v1.10.2 separate VOICE ENV from MOD ENV
+---------------------------------------
+- Separates SAM2695's built-in per-voice envelope from ESP32 modular ENV1..3
+  in the CONFIG UI.
+- PERFORMANCE labels now show V-A and V-R to make clear that those controls
+  are VOICE-envelope attack/release, not ENV1..3.
+- Adds a dedicated VOICE ENV page with ATK / DEC / REL.
+- Encoder short press on VOICE ENV temporarily sets ATK/DEC/REL to the neutral
+  SAM2695 offsets 64/64/64. This is useful when auditioning filter modulation;
+  the change only becomes permanent if the preset is explicitly saved.
+- The former FILTER/LEGACY page is now TONE/FX and no longer edits voice
+  envelope values. It keeps CUT / RES / REV / vibrato rate / vibrato depth.
+- Freshly migrated modular ENV1 no longer copies the voice-envelope timing;
+  it starts as an independent short LOG contour suitable for filter routing.

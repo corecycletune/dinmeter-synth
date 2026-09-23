@@ -942,3 +942,23 @@ v1.10.0 modular preset core
 - Modular routes are intentionally inactive in v1.10.0, so this release should
   sound the same as v1.9.10. It is the storage/data-model foundation for the
   modulation engine coming in later v1.10.x releases.
+
+
+v1.10.1 first virtual patch cable: ENV -> CUTOFF
+------------------------------------------------
+- Adds a real ESP32-side ADSR engine for all three generic ENV modules.
+- ENV time mapping is cubic from 0..127 to roughly 0..8000 ms, giving useful
+  resolution for fast attacks and still allowing long sweeps.
+- ENV supports attack, decay, sustain, release, linear/exp/log curve and a
+  retrigger flag.
+- Adds a generic route summing engine. In this first stage, the UI exposes
+  ENV1/2/3 as sources and CUTOFF as the working destination.
+- Sixteen preset-scoped route slots can each store SOURCE, DESTINATION,
+  bipolar AMOUNT (-127..+127), and ON/OFF.
+- Multiple routes are summed inside ESP32 first; only the final cutoff value is
+  transmitted to SAM2695.
+- Continuous GS TVF output is capped around 42 Hz and unchanged values are
+  suppressed, avoiding one MIDI stream per virtual cable.
+- CONFIG now has ENV and ROUTE pages. Encoder short press selects ENV 1..3 or
+  ROUTE 01..16; encoder rotation still changes the main page.
+- Existing legacy FILTER/ENV and MOD pages remain available during migration.

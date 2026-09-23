@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.7
+  Version: v1.10.8
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -36,7 +36,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.7";
+  "DINMETER_FW_VERSION=v1.10.8";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -476,7 +476,7 @@ static const char* MOD_LABELS[8] = {
 };
 
 static const char* CONFIG_BUTTON_LABELS[8] = {
-  "MON", "GLD", "LEG", "TST", "SFT", "REV", "VIB", "PAN"
+  "MON", "GLD", "LEG", "SFT", "REV", "VIB", "PNC", "TST"
 };
 
 // ======================================================================
@@ -1340,7 +1340,7 @@ void initModularDefaults(Preset& p) {
 }
 
 void migrateStoredPresetV1910(const StoredPresetV1910& oldPreset, Preset& out) {
-  // Preset keeps the entire v1.10.7 object as a byte-compatible prefix.
+  // Preset keeps the entire v1.10.8 object as a byte-compatible prefix.
   memcpy(&out, &oldPreset, sizeof(oldPreset));
   initModularDefaults(out);
 }
@@ -3205,23 +3205,25 @@ void updateByteLeds() {
     return;
   }
 
-  bool states[7] = {
+  bool states[6] = {
     (bool)currentPreset.mono,
     (bool)currentPreset.glide,
     (bool)currentPreset.legato,
-    configAuditionEnabled,
     (bool)currentPreset.soft,
     (bool)currentPreset.reverbEnabled,
     (bool)currentPreset.vibratoEnabled
   };
 
-  for (uint8_t i = 0; i < 7; ++i) {
+  for (uint8_t i = 0; i < 6; ++i) {
     if (states[i]) setLogicalByteLed(i, 0x00FF40, 70);
     else           setLogicalByteLed(i, 0x302000, 24);
   }
 
-  // PANIC is an action, always red.
-  setLogicalByteLed(7, 0xFF0000, 55);
+  // PANIC is an action, always red. TEST is an ON/OFF audition state.
+  setLogicalByteLed(6, 0xFF0000, 55);
+  setLogicalByteLed(7,
+                    configAuditionEnabled ? 0x00FF40 : 0x302000,
+                    configAuditionEnabled ? 70 : 24);
 }
 
 void toggleConfigButton(uint8_t logical) {
@@ -3251,30 +3253,30 @@ void toggleConfigButton(uint8_t logical) {
       markModified();
       break;
 
-    case 3: // CONFIG TEST / audition generator
-      setConfigAuditionEnabled(!configAuditionEnabled);
-      break;
-
-    case 4: // SOFT
+    case 3: // SOFT
       currentPreset.soft = !currentPreset.soft;
       applyPedalsAll();
       markModified();
       break;
 
-    case 5: // REVERB ENABLE
+    case 4: // REVERB ENABLE
       currentPreset.reverbEnabled = !currentPreset.reverbEnabled;
       applyReverbAll();
       markModified();
       break;
 
-    case 6: // VIBRATO ENABLE
+    case 5: // VIBRATO ENABLE
       currentPreset.vibratoEnabled = !currentPreset.vibratoEnabled;
       applyVibratoAll();
       markModified();
       break;
 
-    case 7: // PANIC
+    case 6: // PANIC
       panicAll("MANUAL");
+      break;
+
+    case 7: // CONFIG TEST / audition generator
+      setConfigAuditionEnabled(!configAuditionEnabled);
       break;
   }
 
@@ -4794,7 +4796,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.7");
+  M5.Display.print("FW          : v1.10.8");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -4848,7 +4850,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.7  LATEST ");
+    M5.Display.print("FW v1.10.8  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -5252,14 +5254,15 @@ void drawConfigScreen() {
   M5.Display.drawLine(x0, 76, w - 1, 76, C_AMBER);
 
   // ByteButton row
-  bool btnStates[7] = {
+  bool btnStates[8] = {
     (bool)currentPreset.mono,
     (bool)currentPreset.glide,
     (bool)currentPreset.legato,
-    configAuditionEnabled,
     (bool)currentPreset.soft,
     (bool)currentPreset.reverbEnabled,
-    (bool)currentPreset.vibratoEnabled
+    (bool)currentPreset.vibratoEnabled,
+    false, // PANIC is an action, not a state
+    configAuditionEnabled
   };
 
   for (uint8_t i = 0; i < 8; ++i) {
@@ -5269,14 +5272,14 @@ void drawConfigScreen() {
     M5.Display.setCursor(x + 2, 83);
     M5.Display.print(CONFIG_BUTTON_LABELS[i]);
 
-    if (i < 7) {
-      M5.Display.setTextColor(btnStates[i] ? C_GREEN : C_GREY, C_BLACK);
-      M5.Display.setCursor(x + 8, 99);
-      M5.Display.print(btnStates[i] ? "ON" : "--");
-    } else {
+    if (i == 6) {
       M5.Display.setTextColor(C_RED, C_BLACK);
       M5.Display.setCursor(x + 5, 99);
       M5.Display.print("!!");
+    } else {
+      M5.Display.setTextColor(btnStates[i] ? C_GREEN : C_GREY, C_BLACK);
+      M5.Display.setCursor(x + 8, 99);
+      M5.Display.print(btnStates[i] ? "ON" : "--");
     }
   }
 
@@ -5496,7 +5499,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.7");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.8");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -5550,7 +5553,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.7
+  Version: v1.10.8
   END
   ======================================================================
 */

@@ -928,3 +928,17 @@ v1.9.10 live TVF depth experiment
 - Static NRPN cutoff returns to neutral 64 so the live depth can sweep in both
   directions around the center.
 - Resonance remains on NRPN 0121.
+
+
+v1.10.0 modular preset core
+---------------------------
+- Adds three generic ENV modules, three generic LFO modules, and sixteen
+  SOURCE -> DESTINATION -> AMOUNT modulation-route slots to every preset.
+- Initial destinations are CUTOFF, PITCH and AMP; additional destinations can
+  be appended later without changing the routing model.
+- The modular data is preset-scoped and is saved together with each sound.
+- Existing v1.9.10 NVS preset blobs are detected by size and migrated
+  losslessly into the new preset structure.
+- Modular routes are intentionally inactive in v1.10.0, so this release should
+  sound the same as v1.9.10. It is the storage/data-model foundation for the
+  modulation engine coming in later v1.10.x releases.

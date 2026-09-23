@@ -1059,3 +1059,12 @@ v1.10.7 CONFIG audition generator
 - Removes DinMeter's forced/runtime sustain latch from CONFIG. Sustain is no
   longer stored or forced by a preset/UI button. Incoming keyboard CC64 pedal
   sustain remains supported as a normal performance control.
+
+
+v1.10.8 CONFIG button layout cleanup
+------------------------------------
+- Reorders CONFIG ByteButton functions left-to-right as:
+  MON / GLD / LEG / SFT / REV / VIB / PNC / TST.
+- Renames the old ambiguous PAN label to PNC for PANIC.
+- Moves the CONFIG audition TST control to the far-right button.
+- PANIC remains a red action button; TST remains a normal ON/OFF state.

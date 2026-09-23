@@ -2074,9 +2074,10 @@ void loadPreset(uint8_t bank, uint8_t slot) {
   browseBank = bank;
 
   loadPresetData(currentPresetIndex(), currentPreset);
+  loadGmLayerData(currentPresetIndex(), currentGmLayer);
 
-  // PERFORMANCE physical Portamento knob is authoritative for synth banks.
-  if (!configMode && !isGmQuickBank()) {
+  // PERFORMANCE physical Portamento knob is authoritative.
+  if (!configMode) {
     uint16_t portRaw = angle8.getAnalogInput(6, _12bit);
     uint8_t portV = rawTo127(portRaw, 6);
     bool physicalOn = (portV >= 64);
@@ -2169,6 +2170,26 @@ uint8_t currentParamAs127(uint8_t knob) {
     }
   }
 
+  if (page == PAGE_GM) {
+    switch (knob) {
+      case 0: return currentGmLayer.program;
+      case 1: return currentGmLayer.level;
+      case 2: return mapSignedTo127(currentGmLayer.transpose, -48, 48);
+      case 3: return currentGmLayer.pan;
+      default: return 0;
+    }
+  }
+
+  if (page == PAGE_GM) {
+    switch (knob) {
+      case 0: snprintf(out, n, "%03u", currentGmLayer.program + 1); return;
+      case 1: snprintf(out, n, "%u", currentGmLayer.level); return;
+      case 2: snprintf(out, n, "%+d", currentGmLayer.transpose / 12); return;
+      case 3: snprintf(out, n, "%u", currentGmLayer.pan); return;
+      default: snprintf(out, n, "-"); return;
+    }
+  }
+
   if (page == PAGE_ENV) {
     const EnvelopeState& env = currentPreset.env[selectedEnv];
     switch (knob) {
@@ -2218,6 +2239,7 @@ bool knobIsReserved(uint8_t knob) {
   if (page == PAGE_FILTER_ENV) return knob >= 5;
   if (page == PAGE_VOICE_ENV) return knob >= 3;
   if (page >= PAGE_OSC1 && page <= PAGE_OSC3) return knob == 7;
+  if (page == PAGE_GM) return knob >= 4;
   if (page == PAGE_ENV) return knob >= 6;
   if (page == PAGE_ROUTE) return knob >= 4;
 
@@ -2591,6 +2613,63 @@ void applyOscPageKnob(uint8_t page, uint8_t knob, uint8_t v) {
   if (changed) markModified();
 }
 
+void applyGmPageKnob(uint8_t knob, uint8_t v) {
+  bool changed = false;
+
+  switch (knob) {
+    case 0:
+      if (currentGmLayer.program != v) {
+        currentGmLayer.program = v;
+        changed = true;
+        reapplyAndRebuild();
+
+        char title[16];
+        snprintf(title, sizeof(title), "GM %03u", v + 1);
+        setParamPopup(title, gmProgramName(v));
+      }
+      break;
+
+    case 1: {
+      uint8_t oldLevel = currentGmLayer.level;
+      if (oldLevel != v) {
+        currentGmLayer.level = v;
+        changed = true;
+        if ((oldLevel == 0) != (v == 0)) {
+          reapplyAndRebuild();
+        } else {
+          synth.setVolume(GM_CH, currentGmLayer.level);
+        }
+      }
+      break;
+    }
+
+    case 2: {
+      uint8_t idx = (uint8_t)(((uint16_t)v * 9) / 128);
+      if (idx > 8) idx = 8;
+      int8_t trans = ((int)idx - 4) * 12;
+      if (currentGmLayer.transpose != trans) {
+        currentGmLayer.transpose = trans;
+        changed = true;
+        reapplyAndRebuild();
+      }
+      break;
+    }
+
+    case 3:
+      if (currentGmLayer.pan != v) {
+        currentGmLayer.pan = v;
+        synth.setPan(GM_CH, currentGmLayer.pan);
+        changed = true;
+      }
+      break;
+
+    default:
+      return;
+  }
+
+  if (changed) markModified();
+}
+
 void applyModPageKnob(uint8_t knob, uint8_t v) {
   bool changed = false;
 
@@ -2704,6 +2783,8 @@ void applyKnobValue(uint8_t knob, uint8_t value) {
     applyVoiceEnvPageKnob(knob, value);
   } else if (page >= PAGE_OSC1 && page <= PAGE_OSC3) {
     applyOscPageKnob(page, knob, value);
+  } else if (page == PAGE_GM) {
+    applyGmPageKnob(knob, value);
   } else if (page == PAGE_ENV) {
     applyEnvPageKnob(knob, value);
   } else if (page == PAGE_ROUTE) {
@@ -3549,11 +3630,7 @@ void handleEncoderRotate(int detents) {
     updateByteLeds();
 
     snprintf(overlayTitle, sizeof(overlayTitle), "BANK SELECT");
-    if (browseBank == GM_BANK_INDEX) {
-      snprintf(overlaySub, sizeof(overlaySub), "BANK %u / GM", browseBank + 1);
-    } else {
-      snprintf(overlaySub, sizeof(overlaySub), "BANK %u", browseBank + 1);
-    }
+    snprintf(overlaySub, sizeof(overlaySub), "%s", BANK_GROUP_NAMES[browseBank]);
     overlayActive = true;
     overlayUntil = millis() + 1200;
     screenDirty = true;
@@ -4581,7 +4658,7 @@ void drawPerformanceScreen() {
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(C_YELLOW, C_BLACK);
   M5.Display.setCursor(x0 + 6, 13);
-  M5.Display.printf("B%u", browseBank + 1);
+  M5.Display.print(BANK_SHORT_NAMES[browseBank]);
 
   M5.Display.setCursor(x0 + 34, 13);
   M5.Display.setTextColor(C_WHITE, C_BLACK);
@@ -4655,6 +4732,7 @@ const char** labelsForPage(uint8_t page) {
   if (page == PAGE_FILTER_ENV) return FILTER_LABELS;
   if (page == PAGE_VOICE_ENV) return VOICE_ENV_LABELS;
   if (page >= PAGE_OSC1 && page <= PAGE_OSC3) return OSC_LABELS;
+  if (page == PAGE_GM) return GM_LABELS;
   if (page == PAGE_ENV) return ENV_LABELS;
   if (page == PAGE_ROUTE) return ROUTE_LABELS;
   return MOD_LABELS;
@@ -4776,7 +4854,11 @@ void drawConfigScreen() {
   M5.Display.setTextSize(1);
   M5.Display.setCursor(x0 + 5, 20);
 
-  if (configPage == PAGE_ENV) {
+  if (configPage == PAGE_GM) {
+    M5.Display.printf("GM %03u %.11s",
+                      currentGmLayer.program + 1,
+                      gmProgramName(currentGmLayer.program));
+  } else if (configPage == PAGE_ENV) {
     M5.Display.printf("CONFIG // ENV %u/%u", selectedEnv + 1, ENV_COUNT);
   } else if (configPage == PAGE_ROUTE) {
     M5.Display.printf("CONFIG // ROUTE %02u/%02u",
@@ -5016,6 +5098,7 @@ void synthAppSetup() {
   browseBank = loadedBank;
 
   loadPresetData(currentPresetIndex(), currentPreset);
+  loadGmLayerData(currentPresetIndex(), currentGmLayer);
 
   // Current physical volume is authoritative at boot.
   uint16_t volRaw = angle8.getAnalogInput(0, _12bit);

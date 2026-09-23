@@ -2324,19 +2324,6 @@ uint8_t currentParamAs127(uint8_t knob) {
     }
   }
 
-  if (page == PAGE_LFO) {
-    const LfoState& lfo = currentPreset.lfo[selectedLfo];
-    switch (knob) {
-      case 0: snprintf(out, n, "%s", lfoWaveLabel(lfo.waveform)); return;
-      case 1: snprintf(out, n, "%u", lfo.rate); return;
-      case 2: snprintf(out, n, "%u", lfo.delay); return;
-      case 3: snprintf(out, n, "%u", lfo.fade); return;
-      case 4: snprintf(out, n, "%s", lfo.retrigger ? "ON" : "--"); return;
-      case 5: snprintf(out, n, "%u", lfo.phase); return;
-      default: snprintf(out, n, "-"); return;
-    }
-  }
-
   if (page == PAGE_ENV) {
     const EnvelopeState& env = currentPreset.env[selectedEnv];
     switch (knob) {
@@ -4981,6 +4968,19 @@ void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
       case 1: snprintf(out, n, "%u", currentGmLayer.level); return;
       case 2: snprintf(out, n, "%+d", currentGmLayer.transpose / 12); return;
       case 3: snprintf(out, n, "%u", currentGmLayer.pan); return;
+      default: snprintf(out, n, "-"); return;
+    }
+  }
+
+  if (page == PAGE_LFO) {
+    const LfoState& lfo = currentPreset.lfo[selectedLfo];
+    switch (knob) {
+      case 0: snprintf(out, n, "%s", lfoWaveLabel(lfo.waveform)); return;
+      case 1: snprintf(out, n, "%u", lfo.rate); return;
+      case 2: snprintf(out, n, "%u", lfo.delay); return;
+      case 3: snprintf(out, n, "%u", lfo.fade); return;
+      case 4: snprintf(out, n, "%s", lfo.retrigger ? "ON" : "--"); return;
+      case 5: snprintf(out, n, "%u", lfo.phase); return;
       default: snprintf(out, n, "-"); return;
     }
   }

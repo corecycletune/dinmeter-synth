@@ -992,3 +992,19 @@ v1.10.3 GM browser + preset recovery
   if a saved factory-named preset has all three OSC levels at zero, the
   in-memory load falls back to the built-in factory definition.
 - PERFORMANCE preset numbering now displays P1..P8 to match ByteButton labels.
+
+
+v1.10.4 dedicated GM quick bank
+-------------------------------
+- Removes the v1.10.3 GM CONFIG browser; the existing CONFIG UI is restored.
+- Adds a ninth PERFORMANCE bank dedicated to eight quick GM sounds:
+  Grand Piano, EPiano 1, EPiano 2, Vibraphone, Drawbar Organ,
+  Finger Bass, Warm Pad and Saw Lead.
+- The GM bank uses dedicated MIDI channel 4 (zero-based channel index 3).
+  OSC1/OSC2/OSC3 remain level 0 and do not produce sound in this bank.
+- GM bank playback is plain polyphonic GM and bypasses the synth-layer
+  filter/modulation/portamento path. Master volume, sustain, expression,
+  aftertouch and pitch bend still reach the dedicated GM source.
+- Selecting the final bank shows BANK 9 / GM in the existing bank overlay.
+- Keeps the v1.10.3 +/-4 octave expansion for normal OSC pages and the
+  accidentally-silent factory preset recovery.

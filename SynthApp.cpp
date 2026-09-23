@@ -494,17 +494,45 @@ struct EnvRuntime {
   uint32_t stageStartedAt;
 };
 
+struct LfoRuntime {
+  float phase;          // 0.0 .. <1.0
+  float value;          // bipolar -1.0 .. +1.0 after delay/fade
+  float randomValue;    // held value for S&H/random waveform
+  uint32_t lastUpdatedAt;
+  uint32_t triggeredAt;
+  bool active;
+};
+
 EnvRuntime envRuntime[ENV_COUNT] = {};
+LfoRuntime lfoRuntime[LFO_COUNT] = {};
 uint32_t lastModOutputAt = 0;
 static constexpr uint32_t MOD_OUTPUT_INTERVAL_MS = 24; // ~42 Hz max GS updates
 
+void resetLfoRuntime() {
+  uint32_t nowMs = millis();
+
+  for (uint8_t i = 0; i < LFO_COUNT; ++i) {
+    lfoRuntime[i].phase = (float)currentPreset.lfo[i].phase / 128.0f;
+    lfoRuntime[i].value = 0.0f;
+    lfoRuntime[i].randomValue =
+        ((float)(esp_random() & 0xFFFF) / 32767.5f) - 1.0f;
+    lfoRuntime[i].lastUpdatedAt = nowMs;
+    lfoRuntime[i].triggeredAt = 0;
+    lfoRuntime[i].active = false;
+  }
+}
+
 void resetModulationRuntime() {
+  uint32_t nowMs = millis();
+
   for (uint8_t i = 0; i < ENV_COUNT; ++i) {
     envRuntime[i].stage = ENV_STAGE_IDLE;
     envRuntime[i].value = 0.0f;
     envRuntime[i].stageStartValue = 0.0f;
-    envRuntime[i].stageStartedAt = millis();
+    envRuntime[i].stageStartedAt = nowMs;
   }
+
+  resetLfoRuntime();
   lastModOutputAt = 0;
 }
 
@@ -778,8 +806,15 @@ int modulationSourceValue(uint8_t source) {
       return constrain((int)(envRuntime[i].value * 127.0f + 0.5f), 0, 127);
     }
 
-    // LFO / velocity / key / controllers are deliberately reserved in the
-    // schema but will be enabled in later v1.10.x stages.
+    case MODSRC_LFO1:
+    case MODSRC_LFO2:
+    case MODSRC_LFO3: {
+      uint8_t i = source - MODSRC_LFO1;
+      if (i >= LFO_COUNT) return 0;
+      return constrain((int)(lfoRuntime[i].value * 127.0f), -127, 127);
+    }
+
+    // Velocity / key / controllers remain reserved for later stages.
     default:
       return 0;
   }
@@ -955,11 +990,113 @@ void updateEnvelopeRuntime(uint8_t i, uint32_t nowMs) {
   }
 }
 
+float lfoRateHz(uint8_t value) {
+  // Exponential musical range. The current GS cutoff transport is rate-limited
+  // to ~42 updates/s, so cap this first implementation at 8 Hz.
+  const float normalized = (float)value / 127.0f;
+  return 0.05f * powf(160.0f, normalized); // 0.05 .. 8.0 Hz
+}
+
+uint32_t lfoTimeMs(uint8_t value) {
+  // Quadratic 0..5000 ms mapping gives useful resolution near zero.
+  if (value == 0) return 0;
+  uint32_t v = value;
+  return (v * v * 5000UL) / (127UL * 127UL);
+}
+
+float lfoWaveValue(uint8_t waveform, float phase, float randomValue) {
+  switch (waveform) {
+    case LFO_WAVE_SINE:
+      return sinf(phase * 2.0f * PI);
+
+    case LFO_WAVE_TRIANGLE:
+      return 1.0f - 4.0f * fabsf(phase - 0.5f);
+
+    case LFO_WAVE_SAW_UP:
+      return phase * 2.0f - 1.0f;
+
+    case LFO_WAVE_SAW_DOWN:
+      return 1.0f - phase * 2.0f;
+
+    case LFO_WAVE_SQUARE:
+      return phase < 0.5f ? 1.0f : -1.0f;
+
+    case LFO_WAVE_RANDOM:
+      return randomValue;
+
+    default:
+      return 0.0f;
+  }
+}
+
+void triggerModLfos(bool phraseStart) {
+  uint32_t nowMs = millis();
+
+  for (uint8_t i = 0; i < LFO_COUNT; ++i) {
+    const LfoState& lfo = currentPreset.lfo[i];
+
+    if (!phraseStart && !lfo.retrigger) continue;
+
+    lfoRuntime[i].active = true;
+    lfoRuntime[i].triggeredAt = nowMs;
+
+    if (lfo.retrigger) {
+      lfoRuntime[i].phase = (float)lfo.phase / 128.0f;
+      lfoRuntime[i].randomValue =
+          ((float)(esp_random() & 0xFFFF) / 32767.5f) - 1.0f;
+    }
+  }
+}
+
+void updateLfoRuntime(uint8_t i, uint32_t nowMs) {
+  if (i >= LFO_COUNT) return;
+
+  LfoRuntime& rt = lfoRuntime[i];
+  const LfoState& lfo = currentPreset.lfo[i];
+
+  uint32_t deltaMs = nowMs - rt.lastUpdatedAt;
+  rt.lastUpdatedAt = nowMs;
+
+  float nextPhase = rt.phase + ((float)deltaMs / 1000.0f) * lfoRateHz(lfo.rate);
+  bool wrapped = nextPhase >= 1.0f;
+
+  if (nextPhase >= 1.0f) {
+    nextPhase -= floorf(nextPhase);
+  }
+  rt.phase = nextPhase;
+
+  if (wrapped && lfo.waveform == LFO_WAVE_RANDOM) {
+    rt.randomValue =
+        ((float)(esp_random() & 0xFFFF) / 32767.5f) - 1.0f;
+  }
+
+  if (!rt.active) {
+    rt.value = 0.0f;
+    return;
+  }
+
+  uint32_t elapsed = nowMs - rt.triggeredAt;
+  uint32_t delayMs = lfoTimeMs(lfo.delay);
+  if (elapsed < delayMs) {
+    rt.value = 0.0f;
+    return;
+  }
+
+  float gain = 1.0f;
+  uint32_t fadeMs = lfoTimeMs(lfo.fade);
+  if (fadeMs > 0) {
+    uint32_t fadeElapsed = elapsed - delayMs;
+    gain = min(1.0f, (float)fadeElapsed / (float)fadeMs);
+  }
+
+  rt.value = lfoWaveValue(lfo.waveform, rt.phase, rt.randomValue) * gain;
+}
+
 bool hasDynamicCutoffRoute() {
   for (uint8_t i = 0; i < MOD_ROUTE_COUNT; ++i) {
     const ModRoute& route = currentPreset.routes[i];
     if (!route.enabled || route.destination != MODDST_CUTOFF) continue;
-    if (route.source >= MODSRC_ENV1 && route.source <= MODSRC_ENV3) return true;
+    if (route.source >= MODSRC_ENV1 && route.source <= MODSRC_LFO3) return true;
   }
   return false;
 }
@@ -969,6 +1106,9 @@ void updateModulationEngine() {
 
   for (uint8_t i = 0; i < ENV_COUNT; ++i) {
     updateEnvelopeRuntime(i, nowMs);
+  }
+  for (uint8_t i = 0; i < LFO_COUNT; ++i) {
+    updateLfoRuntime(i, nowMs);
   }
 
   if (!hasDynamicCutoffRoute()) return;
@@ -1779,6 +1919,7 @@ void handleNoteOn(uint8_t note, uint8_t velocity) {
 
   const bool phraseStart = (heldCount == 1);
   triggerModEnvelopes(phraseStart);
+  triggerModLfos(phraseStart);
 
   if (!currentPreset.mono) {
     sendLayeredNote(0x90, note, velocity);
@@ -2779,7 +2920,7 @@ void applyLfoPageKnob(uint8_t knob, uint8_t v) {
 
   if (changed) {
     markModified();
-    resetModulationRuntime();
+    resetLfoRuntime();
     sendLiveCutoffAll();
   }
 }

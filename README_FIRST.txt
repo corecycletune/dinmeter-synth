@@ -1008,3 +1008,22 @@ v1.10.4 dedicated GM quick bank
 - Selecting the final bank shows BANK 9 / GM in the existing bank overlay.
 - Keeps the v1.10.3 +/-4 octave expansion for normal OSC pages and the
   accidentally-silent factory preset recovery.
+
+
+v1.10.5 mixable GM layer + named GM bank
+----------------------------------------
+- Restores a GM CONFIG page, but the GM source is now a dedicated fourth
+  sound layer rather than replacing OSC1/OSC2/OSC3.
+- GM page exposes PRG, LVL, OCT and PAN. PRG can select any standard GM
+  bank-0 program 1..128; LVL=0 disables the layer.
+- GM settings are stored per preset in a separate versioned NVS sidecar so
+  existing raw Preset blobs stay compatible.
+- Existing synth presets default to GM LVL=0. Raising GM LVL mixes the chosen
+  GM instrument with OSC1..3.
+- BANK 9 defaults to OSC1/2/3 level 0 and GM LVL 127. Its eight slots start
+  with Grand Piano, EPiano 1, EPiano 2, Vibraphone, Drawbar Organ,
+  Finger Bass, Warm Pad and Saw Lead, but each can be changed and saved.
+- BANK metadata is centralized for future group naming. BANK 9 displays GM
+  in the PERFORMANCE bank indicator and bank-selection overlay.
+- The GM layer follows note priority, sustain, expression, aftertouch,
+  pitch bend and DinMeter software mono/glide behavior.

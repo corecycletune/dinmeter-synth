@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.4
+  Version: v1.10.5
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -35,7 +35,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.4";
+  "DINMETER_FW_VERSION=v1.10.5";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -291,7 +291,27 @@ static constexpr uint8_t PRESETS_PER_BANK = 8;
 static constexpr uint8_t GM_BANK_INDEX = BANK_COUNT - 1;
 static constexpr uint8_t PRESET_COUNT = BANK_COUNT * PRESETS_PER_BANK;
 
+static const char* BANK_SHORT_NAMES[BANK_COUNT] = {
+  "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "GM"
+};
+
+static const char* BANK_GROUP_NAMES[BANK_COUNT] = {
+  "BANK 1", "BANK 2", "BANK 3", "BANK 4",
+  "BANK 5", "BANK 6", "BANK 7", "BANK 8", "GM"
+};
+
+struct __attribute__((packed)) GmLayerState {
+  uint8_t version;
+  uint8_t program;
+  uint8_t level;
+  int8_t transpose;
+  uint8_t pan;
+};
+
+static constexpr uint8_t GM_LAYER_VERSION = 1;
+
 Preset currentPreset;
+GmLayerState currentGmLayer = {GM_LAYER_VERSION, 0, 0, 0, 64};
 
 uint8_t browseBank  = 0;  // encoder selects this bank
 uint8_t loadedBank  = 0;  // actually sounding bank
@@ -328,8 +348,8 @@ static const WaveMaterial WAVE_TABLE[8] = {
   {"HARM",   0, 31},
 };
 
-// Quick-access GM bank. These use a dedicated MIDI channel and do not use
-// OSC1..3, so the three synth layers remain OFF in this bank.
+// Bank 9 starts with these eight useful GM programs. The GM layer is not
+// restricted to them: GM CONFIG can select any standard program 1..128.
 struct GmQuickPreset {
   const char* name;
   uint8_t program;
@@ -346,12 +366,27 @@ static const GmQuickPreset GM_QUICK_PRESETS[PRESETS_PER_BANK] = {
   {"GM Saw Lead",   81},
 };
 
-bool isGmQuickBank() {
-  return loadedBank == GM_BANK_INDEX;
-}
+static const char* GM_PROGRAM_NAMES[128] = {
+  "GrandPno","BrightPno","EGrand","HonkyTonk","EPiano1","EPiano2","Harpsi","Clav",
+  "Celesta","Glock","MusicBox","Vibes","Marimba","Xylophone","TubBell","Dulcimer",
+  "DrawOrgan","PercOrgan","RockOrgan","ChurchOrg","ReedOrgan","Accordion","Harmonica","TangoAcc",
+  "NylonGtr","SteelGtr","JazzGtr","CleanGtr","MuteGtr","Overdrive","DistGtr","GtrHarm",
+  "AcBass","FingerBass","PickBass","Fretless","SlapBass1","SlapBass2","SynBass1","SynBass2",
+  "Violin","Viola","Cello","Contrabass","TremStr","PizzStr","Harp","Timpani",
+  "Strings1","Strings2","SynStr1","SynStr2","ChoirAah","VoiceOoh","SynVoice","OrchHit",
+  "Trumpet","Trombone","Tuba","MuteTrump","FrenchHorn","Brass1","SynBrass1","SynBrass2",
+  "SopSax","AltoSax","TenorSax","BariSax","Oboe","EngHorn","Bassoon","Clarinet",
+  "Piccolo","Flute","Recorder","PanFlute","Bottle","Shakuhachi","Whistle","Ocarina",
+  "SquareLead","SawLead","Calliope","ChiffLead","Charang","VoiceLead","Fifths","BassLead",
+  "NewAgePad","WarmPad","PolyPad","ChoirPad","BowedPad","MetalPad","HaloPad","SweepPad",
+  "RainFX","Soundtrack","Crystal","Atmosphere","Brightness","Goblins","Echoes","SciFi",
+  "Sitar","Banjo","Shamisen","Koto","Kalimba","Bagpipe","Fiddle","Shanai",
+  "TinkleBell","Agogo","SteelDrum","Woodblock","Taiko","MelodTom","SynDrum","RevCymbal",
+  "FretNoise","Breath","Seashore","Bird","Telephone","Helicopter","Applause","Gunshot"
+};
 
-uint8_t gmQuickProgram() {
-  return GM_QUICK_PRESETS[loadedSlot % PRESETS_PER_BANK].program;
+const char* gmProgramName(uint8_t program) {
+  return GM_PROGRAM_NAMES[program & 0x7F];
 }
 
 // ======================================================================
@@ -365,6 +400,7 @@ enum ConfigPage : uint8_t {
   PAGE_OSC1,
   PAGE_OSC2,
   PAGE_OSC3,
+  PAGE_GM,
   PAGE_ENV,
   PAGE_ROUTE,
   PAGE_MOD,
@@ -378,11 +414,11 @@ uint8_t selectedRoute = 0;
 
 static const char* PAGE_NAMES[PAGE_COUNT] = {
   "PERFORMANCE", "TONE / FX", "VOICE ENV", "OSC 1", "OSC 2", "OSC 3",
-  "MOD ENV", "ROUTE", "MOD"
+  "GM LAYER", "MOD ENV", "ROUTE", "MOD"
 };
 
 static const char* PAGE_TAB[PAGE_COUNT] = {
-  "PF", "TN", "VN", "O1", "O2", "O3", "EN", "RT", "MD"
+  "PF", "TN", "VN", "O1", "O2", "O3", "GM", "EN", "RT", "MD"
 };
 
 static const char* PERF_LABELS[8] = {
@@ -399,6 +435,10 @@ static const char* VOICE_ENV_LABELS[8] = {
 
 static const char* OSC_LABELS[8] = {
   "WAV", "LVL", "OCT", "DET", "CUT", "RES", "PAN", "---"
+};
+
+static const char* GM_LABELS[8] = {
+  "PRG", "LVL", "OCT", "PAN", "---", "---", "---", "---"
 };
 
 static const char* ENV_LABELS[8] = {
@@ -1137,7 +1177,7 @@ void initModularDefaults(Preset& p) {
 }
 
 void migrateStoredPresetV1910(const StoredPresetV1910& oldPreset, Preset& out) {
-  // Preset keeps the entire v1.10.4 object as a byte-compatible prefix.
+  // Preset keeps the entire v1.10.5 object as a byte-compatible prefix.
   memcpy(&out, &oldPreset, sizeof(oldPreset));
   initModularDefaults(out);
 }
@@ -1279,6 +1319,47 @@ void presetKey(uint8_t index, char* out, size_t outSize) {
   snprintf(out, outSize, "p%02u", index);
 }
 
+void gmLayerKey(uint8_t index, char* out, size_t outSize) {
+  snprintf(out, outSize, "g%02u", index);
+}
+
+GmLayerState defaultGmLayer(uint8_t index) {
+  GmLayerState state = {GM_LAYER_VERSION, 0, 0, 0, 64};
+  const uint8_t gmStart = GM_BANK_INDEX * PRESETS_PER_BANK;
+
+  if (index >= gmStart && index < PRESET_COUNT) {
+    uint8_t slot = index - gmStart;
+    state.program = GM_QUICK_PRESETS[slot].program;
+    state.level = 127;
+  }
+
+  return state;
+}
+
+void loadGmLayerData(uint8_t index, GmLayerState& out) {
+  out = defaultGmLayer(index);
+
+  char key[8];
+  gmLayerKey(index, key, sizeof(key));
+  if (prefs.getBytesLength(key) != sizeof(GmLayerState)) return;
+
+  GmLayerState stored{};
+  prefs.getBytes(key, &stored, sizeof(stored));
+  if (stored.version != GM_LAYER_VERSION) return;
+
+  stored.program &= 0x7F;
+  stored.level &= 0x7F;
+  stored.transpose = constrain((int)stored.transpose, -48, 48);
+  stored.pan &= 0x7F;
+  out = stored;
+}
+
+void saveGmLayerData(uint8_t index, const GmLayerState& state) {
+  char key[8];
+  gmLayerKey(index, key, sizeof(key));
+  prefs.putBytes(key, &state, sizeof(state));
+}
+
 bool allOscillatorsSilent(const Preset& p) {
   return p.osc[0].level == 0 && p.osc[1].level == 0 && p.osc[2].level == 0;
 }
@@ -1296,11 +1377,6 @@ void recoverAccidentallySilentFactoryPreset(uint8_t index, Preset& out) {
 
 void loadPresetData(uint8_t index, Preset& out) {
   out = makeDefaultPreset(index);
-
-  const uint8_t gmStart = GM_BANK_INDEX * PRESETS_PER_BANK;
-  if (index >= gmStart && index < PRESET_COUNT) {
-    return;
-  }
 
   char key[8];
   presetKey(index, key, sizeof(key));
@@ -1325,6 +1401,7 @@ void saveCurrentPreset() {
   char key[8];
   presetKey(currentPresetIndex(), key, sizeof(key));
   prefs.putBytes(key, &currentPreset, sizeof(Preset));
+  saveGmLayerData(currentPresetIndex(), currentGmLayer);
   modified = false;
   screenDirty = true;
 }
@@ -4349,7 +4426,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.4");
+  M5.Display.print("FW          : v1.10.5");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -4403,7 +4480,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.4  LATEST ");
+    M5.Display.print("FW v1.10.5  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -5001,7 +5078,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.4");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.5");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -5052,7 +5129,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.4
+  Version: v1.10.5
   END
   ======================================================================
 */

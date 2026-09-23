@@ -4013,6 +4013,31 @@ void handleEncoderShortPress() {
     return;
   }
 
+  if (configMode && configPage == PAGE_OSC) {
+    selectedOsc = (selectedOsc + 1) % 3;
+    armPickupForCurrentContext();
+
+    snprintf(overlayTitle, sizeof(overlayTitle), "OSC SELECT");
+    snprintf(overlaySub, sizeof(overlaySub), "OSC %u / 3", selectedOsc + 1);
+    overlayActive = true;
+    overlayUntil = millis() + 500;
+    screenDirty = true;
+    return;
+  }
+
+  if (configMode && configPage == PAGE_LFO) {
+    selectedLfo = (selectedLfo + 1) % LFO_COUNT;
+    armPickupForCurrentContext();
+
+    snprintf(overlayTitle, sizeof(overlayTitle), "LFO SELECT");
+    snprintf(overlaySub, sizeof(overlaySub), "LFO %u / %u",
+             selectedLfo + 1, LFO_COUNT);
+    overlayActive = true;
+    overlayUntil = millis() + 500;
+    screenDirty = true;
+    return;
+  }
+
   if (configMode && configPage == PAGE_VOICE_ENV) {
     currentPreset.attack = 64;
     currentPreset.decay = 64;
@@ -5079,12 +5104,16 @@ void drawConfigScreen() {
   M5.Display.setTextSize(1);
   M5.Display.setCursor(x0 + 5, 20);
 
-  if (configPage == PAGE_GM) {
+  if (configPage == PAGE_OSC) {
+    M5.Display.printf("CONFIG // OSC %u/3", selectedOsc + 1);
+  } else if (configPage == PAGE_GM) {
     M5.Display.printf("GM %03u %.11s",
                       currentGmLayer.program + 1,
                       gmProgramName(currentGmLayer.program));
   } else if (configPage == PAGE_ENV) {
     M5.Display.printf("CONFIG // ENV %u/%u", selectedEnv + 1, ENV_COUNT);
+  } else if (configPage == PAGE_LFO) {
+    M5.Display.printf("CONFIG // LFO %u/%u", selectedLfo + 1, LFO_COUNT);
   } else if (configPage == PAGE_ROUTE) {
     M5.Display.printf("CONFIG // ROUTE %02u/%02u",
                       selectedRoute + 1, MOD_ROUTE_COUNT);
@@ -5152,7 +5181,8 @@ void drawConfigScreen() {
     M5.Display.setCursor(x0 + 5, 117);
     if (configPage == PAGE_VOICE_ENV) {
       M5.Display.print("PUSH=NEUTRAL  ENC=PAGE");
-    } else if (configPage == PAGE_ENV || configPage == PAGE_ROUTE) {
+    } else if (configPage == PAGE_OSC || configPage == PAGE_ENV ||
+               configPage == PAGE_LFO || configPage == PAGE_ROUTE) {
       M5.Display.print("PUSH=NEXT   ENC=PAGE");
     } else {
       M5.Display.print("ENC=PAGE   HOLD=SAVE");

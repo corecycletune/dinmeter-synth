@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.5
+  Version: v1.10.6
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -29,13 +29,14 @@
 #include <Wire.h>
 #include <Preferences.h>
 #include <stddef.h>
+#include <math.h>
 #include <esp_system.h>
 #include "esp32-hal-tinyusb.h"
 
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.5";
+  "DINMETER_FW_VERSION=v1.10.6";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -397,11 +398,10 @@ enum ConfigPage : uint8_t {
   PAGE_PERF = 0,
   PAGE_FILTER_ENV,
   PAGE_VOICE_ENV,
-  PAGE_OSC1,
-  PAGE_OSC2,
-  PAGE_OSC3,
+  PAGE_OSC,
   PAGE_GM,
   PAGE_ENV,
+  PAGE_LFO,
   PAGE_ROUTE,
   PAGE_MOD,
   PAGE_COUNT
@@ -409,16 +409,18 @@ enum ConfigPage : uint8_t {
 
 uint8_t configPage = PAGE_PERF;
 bool configMode = false;
+uint8_t selectedOsc = 0;
 uint8_t selectedEnv = 0;
+uint8_t selectedLfo = 0;
 uint8_t selectedRoute = 0;
 
 static const char* PAGE_NAMES[PAGE_COUNT] = {
-  "PERFORMANCE", "TONE / FX", "VOICE ENV", "OSC 1", "OSC 2", "OSC 3",
-  "GM LAYER", "MOD ENV", "ROUTE", "MOD"
+  "PERFORMANCE", "TONE / FX", "VOICE ENV", "OSC",
+  "GM LAYER", "MOD ENV", "LFO", "ROUTE", "MOD"
 };
 
 static const char* PAGE_TAB[PAGE_COUNT] = {
-  "PF", "TN", "VN", "O1", "O2", "O3", "GM", "EN", "RT", "MD"
+  "PF", "TN", "VN", "OS", "GM", "EN", "LF", "RT", "MD"
 };
 
 static const char* PERF_LABELS[8] = {
@@ -443,6 +445,10 @@ static const char* GM_LABELS[8] = {
 
 static const char* ENV_LABELS[8] = {
   "ATK", "DEC", "SUS", "REL", "CUR", "RTR", "---", "---"
+};
+
+static const char* LFO_LABELS[8] = {
+  "WAV", "RATE", "DLY", "FADE", "RTR", "PHS", "---", "---"
 };
 
 static const char* ROUTE_LABELS[8] = {
@@ -1178,7 +1184,7 @@ void initModularDefaults(Preset& p) {
 }
 
 void migrateStoredPresetV1910(const StoredPresetV1910& oldPreset, Preset& out) {
-  // Preset keeps the entire v1.10.5 object as a byte-compatible prefix.
+  // Preset keeps the entire v1.10.6 object as a byte-compatible prefix.
   memcpy(&out, &oldPreset, sizeof(oldPreset));
   initModularDefaults(out);
 }
@@ -4463,7 +4469,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.5");
+  M5.Display.print("FW          : v1.10.6");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -4517,7 +4523,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.5  LATEST ");
+    M5.Display.print("FW v1.10.6  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -5131,7 +5137,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.5");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.6");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -5182,7 +5188,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.5
+  Version: v1.10.6
   END
   ======================================================================
 */

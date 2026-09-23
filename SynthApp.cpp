@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.1
+  Version: v1.10.2
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -35,7 +35,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.1";
+  "DINMETER_FW_VERSION=v1.10.2";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -333,6 +333,7 @@ static const WaveMaterial WAVE_TABLE[8] = {
 enum ConfigPage : uint8_t {
   PAGE_PERF = 0,
   PAGE_FILTER_ENV,
+  PAGE_VOICE_ENV,
   PAGE_OSC1,
   PAGE_OSC2,
   PAGE_OSC3,
@@ -348,21 +349,25 @@ uint8_t selectedEnv = 0;
 uint8_t selectedRoute = 0;
 
 static const char* PAGE_NAMES[PAGE_COUNT] = {
-  "PERFORMANCE", "FILTER / LEGACY", "OSC 1", "OSC 2", "OSC 3",
-  "ENV", "ROUTE", "MOD"
+  "PERFORMANCE", "TONE / FX", "VOICE ENV", "OSC 1", "OSC 2", "OSC 3",
+  "MOD ENV", "ROUTE", "MOD"
 };
 
-// Two-character tabs remain readable with eight pages on the 128px display.
+// Two-character tabs still fit at nine pages on the 128px display.
 static const char* PAGE_TAB[PAGE_COUNT] = {
-  "PF", "FL", "O1", "O2", "O3", "EN", "RT", "MD"
+  "PF", "TN", "VN", "O1", "O2", "O3", "EN", "RT", "MD"
 };
 
 static const char* PERF_LABELS[8] = {
-  "VOL", "CUT", "RES", "ATK", "REL", "VIB", "PRT", "GLD"
+  "VOL", "CUT", "RES", "V-A", "V-R", "VIB", "PRT", "GLD"
 };
 
 static const char* FILTER_LABELS[8] = {
-  "CUT", "RES", "ATK", "DEC", "REL", "REV", "VR", "VD"
+  "CUT", "RES", "REV", "VR", "VD", "---", "---", "---"
+};
+
+static const char* VOICE_ENV_LABELS[8] = {
+  "ATK", "DEC", "REL", "---", "---", "---", "---", "---"
 };
 
 static const char* OSC_LABELS[8] = {
@@ -1088,9 +1093,9 @@ uint8_t fineTuneValueFromCents(int cents) {
 void initModularDefaults(Preset& p) {
   p.modularSchemaVersion = MODULAR_SCHEMA_VERSION;
 
-  // ENV1 mirrors the legacy amp envelope so a later routing migration can
-  // preserve familiar behavior. ENV2/3 start neutral and unpatched.
-  p.env[0] = {p.attack, p.decay, 127, p.release, ENV_CURVE_LINEAR, 1};
+  // MOD ENV is intentionally independent from SAM2695's per-voice envelope.
+  // ENV1 starts as a short filter-style contour; ENV2/3 remain neutral.
+  p.env[0] = {0, 48, 0, 32, ENV_CURVE_LOG, 1};
   p.env[1] = {0, 64, 0, 64, ENV_CURVE_LINEAR, 1};
   p.env[2] = {0, 64, 0, 64, ENV_CURVE_LINEAR, 1};
 
@@ -1105,7 +1110,7 @@ void initModularDefaults(Preset& p) {
 }
 
 void migrateStoredPresetV1910(const StoredPresetV1910& oldPreset, Preset& out) {
-  // Preset keeps the entire v1.10.1 object as a byte-compatible prefix.
+  // Preset keeps the entire v1.10.2 object as a byte-compatible prefix.
   memcpy(&out, &oldPreset, sizeof(oldPreset));
   initModularDefaults(out);
 }
@@ -1911,12 +1916,19 @@ uint8_t currentParamAs127(uint8_t knob) {
     switch (knob) {
       case 0: return currentPreset.cutoff;
       case 1: return currentPreset.resonance;
-      case 2: return currentPreset.attack;
-      case 3: return currentPreset.decay;
-      case 4: return currentPreset.release;
-      case 5: return currentPreset.reverb;
-      case 6: return currentPreset.vibratoRate;
-      case 7: return currentPreset.vibratoDepth;
+      case 2: return currentPreset.reverb;
+      case 3: return currentPreset.vibratoRate;
+      case 4: return currentPreset.vibratoDepth;
+      default: return 0;
+    }
+  }
+
+  if (page == PAGE_VOICE_ENV) {
+    switch (knob) {
+      case 0: return currentPreset.attack;
+      case 1: return currentPreset.decay;
+      case 2: return currentPreset.release;
+      default: return 0;
     }
   }
 
@@ -1981,6 +1993,8 @@ uint8_t currentParamAs127(uint8_t knob) {
 bool knobIsReserved(uint8_t knob) {
   uint8_t page = configMode ? configPage : (uint8_t)PAGE_PERF;
 
+  if (page == PAGE_FILTER_ENV) return knob >= 5;
+  if (page == PAGE_VOICE_ENV) return knob >= 3;
   if (page >= PAGE_OSC1 && page <= PAGE_OSC3) return knob == 7;
   if (page == PAGE_ENV) return knob >= 6;
   if (page == PAGE_ROUTE) return knob >= 4;
@@ -2166,7 +2180,7 @@ void applyPerformanceKnob(uint8_t knob, uint8_t v) {
         applyEnvelopeAll();
         markModified();
       }
-      popupNumber("ATTACK", v);
+      popupNumber("VOICE ATK", v);
       return;
 
     case 4:
@@ -2175,7 +2189,7 @@ void applyPerformanceKnob(uint8_t knob, uint8_t v) {
         applyEnvelopeAll();
         markModified();
       }
-      popupNumber("RELEASE", v);
+      popupNumber("VOICE REL", v);
       return;
 
     case 5:
@@ -2212,46 +2226,64 @@ void applyFilterPageKnob(uint8_t knob, uint8_t v) {
       currentPreset.cutoff = v;
       if (changed) sendLiveCutoffAll();
       break;
+
     case 1:
       changed = currentPreset.resonance != v;
       currentPreset.resonance = v;
       if (changed) applyFilterAll();
       break;
+
     case 2:
-      changed = currentPreset.attack != v;
-      currentPreset.attack = v;
-      if (changed) applyEnvelopeAll();
-      break;
-    case 3:
-      changed = currentPreset.decay != v;
-      currentPreset.decay = v;
-      if (changed) applyEnvelopeAll();
-      break;
-    case 4:
-      changed = currentPreset.release != v;
-      currentPreset.release = v;
-      if (changed) applyEnvelopeAll();
-      break;
-    case 5:
       changed = currentPreset.reverb != v;
       currentPreset.reverb = v;
       if (v > 0) currentPreset.reverbEnabled = 1;
       if (changed) applyReverbAll();
       break;
-    case 6:
+
+    case 3:
       changed = currentPreset.vibratoRate != v;
       currentPreset.vibratoRate = v;
       if (changed) applyVibratoAll();
       break;
-    case 7:
+
+    case 4:
       changed = currentPreset.vibratoDepth != v;
       currentPreset.vibratoDepth = v;
       if (v > 0) currentPreset.vibratoEnabled = 1;
       if (changed) applyVibratoAll();
       break;
+
+    default:
+      return;
   }
 
   if (changed) markModified();
+}
+
+void applyVoiceEnvPageKnob(uint8_t knob, uint8_t v) {
+  bool changed = false;
+
+  switch (knob) {
+    case 0:
+      changed = currentPreset.attack != v;
+      currentPreset.attack = v;
+      break;
+    case 1:
+      changed = currentPreset.decay != v;
+      currentPreset.decay = v;
+      break;
+    case 2:
+      changed = currentPreset.release != v;
+      currentPreset.release = v;
+      break;
+    default:
+      return;
+  }
+
+  if (changed) {
+    applyEnvelopeAll();
+    markModified();
+  }
 }
 
 void applyOscPageKnob(uint8_t page, uint8_t knob, uint8_t v) {
@@ -2446,6 +2478,8 @@ void applyKnobValue(uint8_t knob, uint8_t value) {
     applyPerformanceKnob(knob, value);
   } else if (page == PAGE_FILTER_ENV) {
     applyFilterPageKnob(knob, value);
+  } else if (page == PAGE_VOICE_ENV) {
+    applyVoiceEnvPageKnob(knob, value);
   } else if (page >= PAGE_OSC1 && page <= PAGE_OSC3) {
     applyOscPageKnob(page, knob, value);
   } else if (page == PAGE_ENV) {
@@ -3490,6 +3524,22 @@ void handleEncoderShortPress() {
     return;
   }
 
+  if (configMode && configPage == PAGE_VOICE_ENV) {
+    currentPreset.attack = 64;
+    currentPreset.decay = 64;
+    currentPreset.release = 64;
+    applyEnvelopeAll();
+    markModified();
+    armPickupForCurrentContext();
+
+    snprintf(overlayTitle, sizeof(overlayTitle), "VOICE ENV");
+    snprintf(overlaySub, sizeof(overlaySub), "NEUTRAL 64/64/64");
+    overlayActive = true;
+    overlayUntil = millis() + 700;
+    screenDirty = true;
+    return;
+  }
+
   if (configMode && configPage == PAGE_ENV) {
     selectedEnv = (selectedEnv + 1) % ENV_COUNT;
     armPickupForCurrentContext();
@@ -4122,7 +4172,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.1");
+  M5.Display.print("FW          : v1.10.2");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -4176,7 +4226,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.1  LATEST ");
+    M5.Display.print("FW v1.10.2  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -4377,6 +4427,7 @@ void drawPerformanceScreen() {
 const char** labelsForPage(uint8_t page) {
   if (page == PAGE_PERF) return PERF_LABELS;
   if (page == PAGE_FILTER_ENV) return FILTER_LABELS;
+  if (page == PAGE_VOICE_ENV) return VOICE_ENV_LABELS;
   if (page >= PAGE_OSC1 && page <= PAGE_OSC3) return OSC_LABELS;
   if (page == PAGE_ENV) return ENV_LABELS;
   if (page == PAGE_ROUTE) return ROUTE_LABELS;
@@ -4399,7 +4450,8 @@ const char* routeSourceLabel(uint8_t source) {
 }
 
 void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
-  if (page == PAGE_PERF || page == PAGE_FILTER_ENV || page == PAGE_MOD) {
+  if (page == PAGE_PERF || page == PAGE_FILTER_ENV ||
+      page == PAGE_VOICE_ENV || page == PAGE_MOD) {
     snprintf(out, n, "%u", currentParamAs127(knob));
     return;
   }
@@ -4565,7 +4617,9 @@ void drawConfigScreen() {
   } else {
     M5.Display.setTextColor(C_GREY, C_BLACK);
     M5.Display.setCursor(x0 + 5, 117);
-    if (configPage == PAGE_ENV || configPage == PAGE_ROUTE) {
+    if (configPage == PAGE_VOICE_ENV) {
+      M5.Display.print("PUSH=NEUTRAL  ENC=PAGE");
+    } else if (configPage == PAGE_ENV || configPage == PAGE_ROUTE) {
       M5.Display.print("PUSH=NEXT   ENC=PAGE");
     } else {
       M5.Display.print("ENC=PAGE   HOLD=SAVE");
@@ -4770,7 +4824,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.1");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.2");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -4821,7 +4875,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.1
+  Version: v1.10.2
   END
   ======================================================================
 */

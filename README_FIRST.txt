@@ -1043,3 +1043,19 @@ v1.10.6 LFO routing + unified OSC page
   a negative amount inverts the modulation.
 - LFO and ENV sums are calculated inside ESP32 first; SAM2695 still receives
   only the final rate-limited cutoff value.
+
+
+v1.10.7 CONFIG audition generator
+---------------------------------
+- Replaces the CONFIG runtime SUS button with TST.
+- TST generates notes internally even when no USB MIDI keyboard is connected.
+- Audition timing is 800 ms note-on followed by 800 ms silence.
+- The test sequence moves across C2..C6 (middle C +/-2 octaves) so patches can
+  be checked over a useful range without extreme high/low notes.
+- Test notes trigger the ESP32 MOD ENV and LFO engines, so filter envelopes and
+  retriggered LFO behavior can be auditioned without an external keyboard.
+- TST stops automatically when CONFIG is left or a modal/maintenance screen is
+  entered.
+- Removes DinMeter's forced/runtime sustain latch from CONFIG. Sustain is no
+  longer stored or forced by a preset/UI button. Incoming keyboard CC64 pedal
+  sustain remains supported as a normal performance control.

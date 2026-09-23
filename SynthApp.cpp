@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.0
+  Version: v1.10.1
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -35,7 +35,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.0";
+  "DINMETER_FW_VERSION=v1.10.1";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -336,19 +336,25 @@ enum ConfigPage : uint8_t {
   PAGE_OSC1,
   PAGE_OSC2,
   PAGE_OSC3,
+  PAGE_ENV,
+  PAGE_ROUTE,
   PAGE_MOD,
   PAGE_COUNT
 };
 
 uint8_t configPage = PAGE_PERF;
 bool configMode = false;
+uint8_t selectedEnv = 0;
+uint8_t selectedRoute = 0;
 
 static const char* PAGE_NAMES[PAGE_COUNT] = {
-  "PERFORMANCE", "FILTER / ENV", "OSC 1", "OSC 2", "OSC 3", "MOD"
+  "PERFORMANCE", "FILTER / LEGACY", "OSC 1", "OSC 2", "OSC 3",
+  "ENV", "ROUTE", "MOD"
 };
 
+// Two-character tabs remain readable with eight pages on the 128px display.
 static const char* PAGE_TAB[PAGE_COUNT] = {
-  "PERF", "F/ENV", "OSC1", "OSC2", "OSC3", "MOD"
+  "PF", "FL", "O1", "O2", "O3", "EN", "RT", "MD"
 };
 
 static const char* PERF_LABELS[8] = {
@@ -361,6 +367,14 @@ static const char* FILTER_LABELS[8] = {
 
 static const char* OSC_LABELS[8] = {
   "WAV", "LVL", "OCT", "DET", "CUT", "RES", "PAN", "---"
+};
+
+static const char* ENV_LABELS[8] = {
+  "ATK", "DEC", "SUS", "REL", "CUR", "RTR", "---", "---"
+};
+
+static const char* ROUTE_LABELS[8] = {
+  "SRC", "DST", "AMT", "ON", "---", "---", "---", "---"
 };
 
 static const char* MOD_LABELS[8] = {
@@ -380,6 +394,41 @@ uint8_t heldVelocity[128] = {};
 uint8_t noteOrder[128] = {};
 uint8_t heldCount = 0;
 int16_t currentMonoNote = -1;
+
+// ======================================================================
+// Modular modulation runtime
+// ENV is calculated inside the ESP32. Only the final destination value is
+// emitted to SAM2695, avoiding one MIDI stream per virtual patch cable.
+// ======================================================================
+
+enum EnvStage : uint8_t {
+  ENV_STAGE_IDLE = 0,
+  ENV_STAGE_ATTACK,
+  ENV_STAGE_DECAY,
+  ENV_STAGE_SUSTAIN,
+  ENV_STAGE_RELEASE
+};
+
+struct EnvRuntime {
+  uint8_t stage;
+  float value;          // normalized 0.0 .. 1.0
+  float stageStartValue;
+  uint32_t stageStartedAt;
+};
+
+EnvRuntime envRuntime[ENV_COUNT] = {};
+uint32_t lastModOutputAt = 0;
+static constexpr uint32_t MOD_OUTPUT_INTERVAL_MS = 24; // ~42 Hz max GS updates
+
+void resetModulationRuntime() {
+  for (uint8_t i = 0; i < ENV_COUNT; ++i) {
+    envRuntime[i].stage = ENV_STAGE_IDLE;
+    envRuntime[i].value = 0.0f;
+    envRuntime[i].stageStartValue = 0.0f;
+    envRuntime[i].stageStartedAt = millis();
+  }
+  lastModOutputAt = 0;
+}
 
 // DinMeter-owned mono/legato voice.
 // While software portamento is active, SAM2695 receives only one NoteOn per
@@ -641,20 +690,217 @@ void configureLiveCutoffController(uint8_t ch) {
   sendCC(ch, LIVE_FILTER_CC2, 127);
 }
 
-void sendLiveCutoff(uint8_t oscIndex) {
+int modulationSourceValue(uint8_t source) {
+  switch (source) {
+    case MODSRC_ENV1:
+    case MODSRC_ENV2:
+    case MODSRC_ENV3: {
+      uint8_t i = source - MODSRC_ENV1;
+      if (i >= ENV_COUNT) return 0;
+      return constrain((int)(envRuntime[i].value * 127.0f + 0.5f), 0, 127);
+    }
+
+    // LFO / velocity / key / controllers are deliberately reserved in the
+    // schema but will be enabled in later v1.10.x stages.
+    default:
+      return 0;
+  }
+}
+
+int modulationForDestination(uint8_t destination) {
+  int total = 0;
+
+  for (uint8_t i = 0; i < MOD_ROUTE_COUNT; ++i) {
+    const ModRoute& route = currentPreset.routes[i];
+    if (!route.enabled || route.destination != destination) continue;
+    if (route.source == MODSRC_NONE || route.destination == MODDST_NONE) continue;
+
+    int source = modulationSourceValue(route.source);
+    total += (source * (int)route.amount) / 127;
+  }
+
+  return total;
+}
+
+uint8_t modulatedCutoffForOsc(uint8_t oscIndex) {
+  int value = (int)oscEffectiveCutoff(oscIndex);
+  value += modulationForDestination(MODDST_CUTOFF);
+  return clamp127(value);
+}
+
+uint8_t lastLiveCutoffSent[3] = {255, 255, 255};
+
+void invalidateLiveCutoffCache() {
+  for (uint8_t i = 0; i < 3; ++i) lastLiveCutoffSent[i] = 255;
+}
+
+void sendLiveCutoff(uint8_t oscIndex, bool force = false) {
   if (oscIndex >= 3) return;
   const uint8_t ch = OSC_CH[oscIndex];
-  const uint8_t depth = oscEffectiveCutoff(oscIndex);
+  const uint8_t depth = modulatedCutoffForOsc(oscIndex);
+
+  if (!force && lastLiveCutoffSent[oscIndex] == depth) return;
 
   // 0 = maximum negative, 64 = neutral, 127 = maximum positive.
   // Stack CC1 and CC2 with the same depth to maximize the audible sweep.
   sendGsPartParameter(ch, 0x20, 0x41, depth);
   sendGsPartParameter(ch, 0x20, 0x51, depth);
+  lastLiveCutoffSent[oscIndex] = depth;
 }
 
-void sendLiveCutoffAll() {
+void sendLiveCutoffAll(bool force = false) {
   for (uint8_t i = 0; i < 3; ++i) {
-    sendLiveCutoff(i);
+    sendLiveCutoff(i, force);
+  }
+}
+
+uint32_t envelopeTimeMs(uint8_t value) {
+  // Cubic mapping gives usable short times while still reaching long sweeps:
+  // 0=0ms, 32~128ms, 64~1024ms, 127~8000ms.
+  if (value == 0) return 0;
+  uint32_t v = value;
+  return (v * v * v * 8000UL) / (127UL * 127UL * 127UL);
+}
+
+float shapeEnvelopeProgress(float t, uint8_t curve) {
+  if (t <= 0.0f) return 0.0f;
+  if (t >= 1.0f) return 1.0f;
+
+  if (curve == ENV_CURVE_EXP) return t * t;
+  if (curve == ENV_CURVE_LOG) {
+    float inv = 1.0f - t;
+    return 1.0f - inv * inv;
+  }
+  return t;
+}
+
+void startEnvelopeStage(uint8_t i, uint8_t stage, uint32_t nowMs, float startValue) {
+  if (i >= ENV_COUNT) return;
+  envRuntime[i].stage = stage;
+  envRuntime[i].stageStartedAt = nowMs;
+  envRuntime[i].stageStartValue = startValue;
+}
+
+void triggerModEnvelopes(bool phraseStart) {
+  uint32_t nowMs = millis();
+
+  for (uint8_t i = 0; i < ENV_COUNT; ++i) {
+    const EnvelopeState& env = currentPreset.env[i];
+
+    // First note of a phrase always starts the envelope. Overlapping notes only
+    // retrigger modules whose RTR flag is enabled.
+    if (!phraseStart && !env.retrigger) continue;
+
+    if (env.attack == 0) {
+      envRuntime[i].value = 1.0f;
+      startEnvelopeStage(i, ENV_STAGE_DECAY, nowMs, 1.0f);
+    } else {
+      envRuntime[i].value = 0.0f;
+      startEnvelopeStage(i, ENV_STAGE_ATTACK, nowMs, 0.0f);
+    }
+  }
+
+  // For zero-attack envelopes, push the peak before the NoteOn reaches SAM.
+  sendLiveCutoffAll();
+}
+
+void releaseModEnvelopes() {
+  uint32_t nowMs = millis();
+
+  for (uint8_t i = 0; i < ENV_COUNT; ++i) {
+    if (envRuntime[i].stage == ENV_STAGE_IDLE) continue;
+
+    if (currentPreset.env[i].release == 0) {
+      envRuntime[i].value = 0.0f;
+      startEnvelopeStage(i, ENV_STAGE_IDLE, nowMs, 0.0f);
+    } else {
+      startEnvelopeStage(i, ENV_STAGE_RELEASE, nowMs, envRuntime[i].value);
+    }
+  }
+}
+
+void updateEnvelopeRuntime(uint8_t i, uint32_t nowMs) {
+  if (i >= ENV_COUNT) return;
+
+  EnvRuntime& rt = envRuntime[i];
+  const EnvelopeState& env = currentPreset.env[i];
+  uint32_t elapsed = nowMs - rt.stageStartedAt;
+
+  switch (rt.stage) {
+    case ENV_STAGE_IDLE:
+      rt.value = 0.0f;
+      return;
+
+    case ENV_STAGE_ATTACK: {
+      uint32_t duration = envelopeTimeMs(env.attack);
+      if (duration == 0 || elapsed >= duration) {
+        rt.value = 1.0f;
+        startEnvelopeStage(i, ENV_STAGE_DECAY, nowMs, 1.0f);
+        return;
+      }
+
+      float t = shapeEnvelopeProgress((float)elapsed / (float)duration, env.curve);
+      rt.value = rt.stageStartValue + (1.0f - rt.stageStartValue) * t;
+      return;
+    }
+
+    case ENV_STAGE_DECAY: {
+      float sustain = (float)env.sustain / 127.0f;
+      uint32_t duration = envelopeTimeMs(env.decay);
+      if (duration == 0 || elapsed >= duration) {
+        rt.value = sustain;
+        startEnvelopeStage(i, ENV_STAGE_SUSTAIN, nowMs, sustain);
+        return;
+      }
+
+      float t = shapeEnvelopeProgress((float)elapsed / (float)duration, env.curve);
+      rt.value = rt.stageStartValue + (sustain - rt.stageStartValue) * t;
+      return;
+    }
+
+    case ENV_STAGE_SUSTAIN:
+      rt.value = (float)env.sustain / 127.0f;
+      return;
+
+    case ENV_STAGE_RELEASE: {
+      uint32_t duration = envelopeTimeMs(env.release);
+      if (duration == 0 || elapsed >= duration) {
+        rt.value = 0.0f;
+        startEnvelopeStage(i, ENV_STAGE_IDLE, nowMs, 0.0f);
+        return;
+      }
+
+      float t = shapeEnvelopeProgress((float)elapsed / (float)duration, env.curve);
+      rt.value = rt.stageStartValue * (1.0f - t);
+      return;
+    }
+  }
+}
+
+bool hasDynamicCutoffRoute() {
+  for (uint8_t i = 0; i < MOD_ROUTE_COUNT; ++i) {
+    const ModRoute& route = currentPreset.routes[i];
+    if (!route.enabled || route.destination != MODDST_CUTOFF) continue;
+    if (route.source >= MODSRC_ENV1 && route.source <= MODSRC_ENV3) return true;
+  }
+  return false;
+}
+
+void updateModulationEngine() {
+  uint32_t nowMs = millis();
+
+  for (uint8_t i = 0; i < ENV_COUNT; ++i) {
+    updateEnvelopeRuntime(i, nowMs);
+  }
+
+  if (!hasDynamicCutoffRoute()) return;
+  if (nowMs - lastModOutputAt < MOD_OUTPUT_INTERVAL_MS) return;
+  lastModOutputAt = nowMs;
+
+  // Only active oscillator layers need continuous updates. Manual/preset
+  // changes still use sendLiveCutoffAll() and configure all three layers.
+  for (uint8_t i = 0; i < 3; ++i) {
+    if (currentPreset.osc[i].level > 0) sendLiveCutoff(i);
   }
 }
 
@@ -859,7 +1105,7 @@ void initModularDefaults(Preset& p) {
 }
 
 void migrateStoredPresetV1910(const StoredPresetV1910& oldPreset, Preset& out) {
-  // Preset keeps the entire v1.10.0 object as a byte-compatible prefix.
+  // Preset keeps the entire v1.10.1 object as a byte-compatible prefix.
   memcpy(&out, &oldPreset, sizeof(oldPreset));
   initModularDefaults(out);
 }
@@ -1149,6 +1395,7 @@ void clearHeldState() {
   monoAnchorNote = -1;
   monoTargetNote = -1;
   resetSoftwareBend(false);
+  resetModulationRuntime();
 }
 
 void pushNoteOrder(uint8_t note) {
@@ -1238,6 +1485,8 @@ void rebuildHeldNotes() {
 
 void applyCurrentPresetToSynth(bool rebuildNotes = true) {
   silenceSynthOnly();
+  resetModulationRuntime();
+  invalidateLiveCutoffCache();
 
   configureLegacyEffects(currentPreset.legacyChorusSend > 0,
                          currentPreset.legacySpatialVolume > 0);
@@ -1309,6 +1558,9 @@ void handleNoteOn(uint8_t note, uint8_t velocity) {
   heldVelocity[note] = velocity;
   pushNoteOrder(note);
 
+  const bool phraseStart = (heldCount == 1);
+  triggerModEnvelopes(phraseStart);
+
   if (!currentPreset.mono) {
     sendLayeredNote(0x90, note, velocity);
     return;
@@ -1362,6 +1614,10 @@ void handleNoteOff(uint8_t note, uint8_t velocity) {
   heldInput[note] = false;
   heldVelocity[note] = 0;
   removeNoteOrder(note);
+
+  if (heldCount == 0) {
+    releaseModEnvelopes();
+  }
 
   if (!currentPreset.mono) {
     sendLayeredNote(0x80, note, velocity);
@@ -1679,6 +1935,33 @@ uint8_t currentParamAs127(uint8_t knob) {
     }
   }
 
+  if (page == PAGE_ENV) {
+    const EnvelopeState& env = currentPreset.env[selectedEnv];
+    switch (knob) {
+      case 0: return env.attack;
+      case 1: return env.decay;
+      case 2: return env.sustain;
+      case 3: return env.release;
+      case 4: return (uint8_t)((min((int)env.curve, 2) * 127) / 2);
+      case 5: return env.retrigger ? 127 : 0;
+      default: return 0;
+    }
+  }
+
+  if (page == PAGE_ROUTE) {
+    const ModRoute& route = currentPreset.routes[selectedRoute];
+    switch (knob) {
+      case 0: {
+        uint8_t src = (route.source <= MODSRC_ENV3) ? route.source : MODSRC_NONE;
+        return (uint8_t)(((uint16_t)src * 127) / MODSRC_ENV3);
+      }
+      case 1: return route.destination == MODDST_CUTOFF ? 127 : 0;
+      case 2: return mapSignedTo127(route.amount, -127, 127);
+      case 3: return route.enabled ? 127 : 0;
+      default: return 0;
+    }
+  }
+
   if (page == PAGE_MOD) {
     switch (knob) {
       case 0: return currentPreset.mod.mwPitch;
@@ -1697,7 +1980,12 @@ uint8_t currentParamAs127(uint8_t knob) {
 
 bool knobIsReserved(uint8_t knob) {
   uint8_t page = configMode ? configPage : PAGE_PERF;
-  return (page >= PAGE_OSC1 && page <= PAGE_OSC3 && knob == 7);
+
+  if (page >= PAGE_OSC1 && page <= PAGE_OSC3) return knob == 7;
+  if (page == PAGE_ENV) return knob >= 6;
+  if (page == PAGE_ROUTE) return knob >= 4;
+
+  return false;
 }
 
 // ======================================================================
@@ -2075,6 +2363,82 @@ void applyModPageKnob(uint8_t knob, uint8_t v) {
   if (changed) markModified();
 }
 
+void applyEnvPageKnob(uint8_t knob, uint8_t v) {
+  EnvelopeState& env = currentPreset.env[selectedEnv];
+  bool changed = false;
+
+  switch (knob) {
+    case 0: changed = env.attack != v;  env.attack = v; break;
+    case 1: changed = env.decay != v;   env.decay = v; break;
+    case 2: changed = env.sustain != v; env.sustain = v; break;
+    case 3: changed = env.release != v; env.release = v; break;
+
+    case 4: {
+      uint8_t curve = (uint8_t)(((uint16_t)v * 3) / 128);
+      if (curve > ENV_CURVE_LOG) curve = ENV_CURVE_LOG;
+      changed = env.curve != curve;
+      env.curve = curve;
+      break;
+    }
+
+    case 5: {
+      uint8_t retrigger = v >= 64 ? 1 : 0;
+      changed = env.retrigger != retrigger;
+      env.retrigger = retrigger;
+      break;
+    }
+
+    default:
+      return;
+  }
+
+  if (changed) markModified();
+}
+
+void applyRoutePageKnob(uint8_t knob, uint8_t v) {
+  ModRoute& route = currentPreset.routes[selectedRoute];
+  bool changed = false;
+
+  switch (knob) {
+    case 0: {
+      uint8_t source = (uint8_t)(((uint16_t)v * 4) / 128);
+      if (source > MODSRC_ENV3) source = MODSRC_ENV3;
+      changed = route.source != source;
+      route.source = source;
+      break;
+    }
+
+    case 1: {
+      uint8_t destination = v >= 64 ? MODDST_CUTOFF : MODDST_NONE;
+      changed = route.destination != destination;
+      route.destination = destination;
+      break;
+    }
+
+    case 2: {
+      int8_t amount = (int8_t)map127ToSigned(v, -127, 127);
+      changed = route.amount != amount;
+      route.amount = amount;
+      break;
+    }
+
+    case 3: {
+      uint8_t enabled = v >= 64 ? 1 : 0;
+      changed = route.enabled != enabled;
+      route.enabled = enabled;
+      break;
+    }
+
+    default:
+      return;
+  }
+
+  if (changed) {
+    sendLiveCutoffAll();
+    markModified();
+  }
+}
+
 void applyKnobValue(uint8_t knob, uint8_t value) {
   uint8_t page = configMode ? configPage : PAGE_PERF;
 
@@ -2084,6 +2448,10 @@ void applyKnobValue(uint8_t knob, uint8_t value) {
     applyFilterPageKnob(knob, value);
   } else if (page >= PAGE_OSC1 && page <= PAGE_OSC3) {
     applyOscPageKnob(page, knob, value);
+  } else if (page == PAGE_ENV) {
+    applyEnvPageKnob(knob, value);
+  } else if (page == PAGE_ROUTE) {
+    applyRoutePageKnob(knob, value);
   } else if (page == PAGE_MOD) {
     applyModPageKnob(knob, value);
   }
@@ -2106,7 +2474,7 @@ void handleConfigModeChange(bool newMode) {
   if (configMode) {
     configPage = PAGE_PERF;
     snprintf(overlayTitle, sizeof(overlayTitle), "CONFIG MODE");
-    snprintf(overlaySub, sizeof(overlaySub), "PAGE 01 / 06");
+    snprintf(overlaySub, sizeof(overlaySub), "PAGE 01 / %02u", PAGE_COUNT);
   } else {
     snprintf(overlayTitle, sizeof(overlayTitle), "PERFORMANCE");
     snprintf(overlaySub, sizeof(overlaySub), "LIVE CONTROL");
@@ -2800,7 +3168,8 @@ int takeEncoderDetents() {
 
 void showPageOverlay() {
   snprintf(overlayTitle, sizeof(overlayTitle), "PAGE CHANGE");
-  snprintf(overlaySub, sizeof(overlaySub), "%02u/06 %s", configPage + 1, PAGE_NAMES[configPage]);
+  snprintf(overlaySub, sizeof(overlaySub), "%02u/%02u %s",
+           configPage + 1, PAGE_COUNT, PAGE_NAMES[configPage]);
   overlayActive = true;
   overlayUntil = millis() + 500;
   screenDirty = true;
@@ -3118,6 +3487,32 @@ void handleEncoderShortPress() {
 
   if (systemMenuActive) {
     selectSystemMenuItem();
+    return;
+  }
+
+  if (configMode && configPage == PAGE_ENV) {
+    selectedEnv = (selectedEnv + 1) % ENV_COUNT;
+    armPickupForCurrentContext();
+
+    snprintf(overlayTitle, sizeof(overlayTitle), "ENV SELECT");
+    snprintf(overlaySub, sizeof(overlaySub), "ENV %u / %u",
+             selectedEnv + 1, ENV_COUNT);
+    overlayActive = true;
+    overlayUntil = millis() + 500;
+    screenDirty = true;
+    return;
+  }
+
+  if (configMode && configPage == PAGE_ROUTE) {
+    selectedRoute = (selectedRoute + 1) % MOD_ROUTE_COUNT;
+    armPickupForCurrentContext();
+
+    snprintf(overlayTitle, sizeof(overlayTitle), "ROUTE SELECT");
+    snprintf(overlaySub, sizeof(overlaySub), "ROUTE %02u / %02u",
+             selectedRoute + 1, MOD_ROUTE_COUNT);
+    overlayActive = true;
+    overlayUntil = millis() + 500;
+    screenDirty = true;
     return;
   }
 
@@ -3727,7 +4122,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.0");
+  M5.Display.print("FW          : v1.10.1");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -3781,7 +4176,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.0  LATEST ");
+    M5.Display.print("FW v1.10.1  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -3983,13 +4378,54 @@ const char** labelsForPage(uint8_t page) {
   if (page == PAGE_PERF) return PERF_LABELS;
   if (page == PAGE_FILTER_ENV) return FILTER_LABELS;
   if (page >= PAGE_OSC1 && page <= PAGE_OSC3) return OSC_LABELS;
+  if (page == PAGE_ENV) return ENV_LABELS;
+  if (page == PAGE_ROUTE) return ROUTE_LABELS;
   return MOD_LABELS;
+}
+
+const char* envCurveLabel(uint8_t curve) {
+  if (curve == ENV_CURVE_EXP) return "EXP";
+  if (curve == ENV_CURVE_LOG) return "LOG";
+  return "LIN";
+}
+
+const char* routeSourceLabel(uint8_t source) {
+  switch (source) {
+    case MODSRC_ENV1: return "E1";
+    case MODSRC_ENV2: return "E2";
+    case MODSRC_ENV3: return "E3";
+    default: return "---";
+  }
 }
 
 void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
   if (page == PAGE_PERF || page == PAGE_FILTER_ENV || page == PAGE_MOD) {
     snprintf(out, n, "%u", currentParamAs127(knob));
     return;
+  }
+
+  if (page == PAGE_ENV) {
+    const EnvelopeState& env = currentPreset.env[selectedEnv];
+    switch (knob) {
+      case 0: snprintf(out, n, "%u", env.attack); return;
+      case 1: snprintf(out, n, "%u", env.decay); return;
+      case 2: snprintf(out, n, "%u", env.sustain); return;
+      case 3: snprintf(out, n, "%u", env.release); return;
+      case 4: snprintf(out, n, "%s", envCurveLabel(env.curve)); return;
+      case 5: snprintf(out, n, "%s", env.retrigger ? "ON" : "--"); return;
+      default: snprintf(out, n, "-"); return;
+    }
+  }
+
+  if (page == PAGE_ROUTE) {
+    const ModRoute& route = currentPreset.routes[selectedRoute];
+    switch (knob) {
+      case 0: snprintf(out, n, "%s", routeSourceLabel(route.source)); return;
+      case 1: snprintf(out, n, "%s", route.destination == MODDST_CUTOFF ? "CUT" : "---"); return;
+      case 2: snprintf(out, n, "%+d", route.amount); return;
+      case 3: snprintf(out, n, "%s", route.enabled ? "ON" : "--"); return;
+      default: snprintf(out, n, "-"); return;
+    }
   }
 
   if (page >= PAGE_OSC1 && page <= PAGE_OSC3) {
@@ -4061,7 +4497,15 @@ void drawConfigScreen() {
   M5.Display.setTextColor(C_YELLOW, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(x0 + 5, 20);
-  M5.Display.printf("CONFIG // %s", PAGE_NAMES[configPage]);
+
+  if (configPage == PAGE_ENV) {
+    M5.Display.printf("CONFIG // ENV %u/%u", selectedEnv + 1, ENV_COUNT);
+  } else if (configPage == PAGE_ROUTE) {
+    M5.Display.printf("CONFIG // ROUTE %02u/%02u",
+                      selectedRoute + 1, MOD_ROUTE_COUNT);
+  } else {
+    M5.Display.printf("CONFIG // %s", PAGE_NAMES[configPage]);
+  }
 
   drawHazardStripe(34, 6, x0, contentW);
 
@@ -4121,7 +4565,11 @@ void drawConfigScreen() {
   } else {
     M5.Display.setTextColor(C_GREY, C_BLACK);
     M5.Display.setCursor(x0 + 5, 117);
-    M5.Display.print("ENC=PAGE   HOLD=SAVE");
+    if (configPage == PAGE_ENV || configPage == PAGE_ROUTE) {
+      M5.Display.print("PUSH=NEXT   ENC=PAGE");
+    } else {
+      M5.Display.print("ENC=PAGE   HOLD=SAVE");
+    }
   }
 
   drawHazardStripe(128, 7, x0, contentW);
@@ -4322,7 +4770,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.0");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.1");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -4353,9 +4801,10 @@ void synthAppLoop() {
   // Critical: keep USB Host serviced continuously during normal operation.
   usbMidi.update();
 
-  // DinMeter-owned mono glide runs independently of the slower UI/control
-  // polling so pitch motion remains continuous while keys are held.
+  // DinMeter-owned time-domain modulators run independently of the slower UI
+  // polling. The MIDI output side is rate-limited inside each engine.
   updateSoftwareGlide();
+  updateModulationEngine();
 
   poll8Angle();
   pollByteButton();
@@ -4372,7 +4821,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.0
+  Version: v1.10.1
   END
   ======================================================================
 */

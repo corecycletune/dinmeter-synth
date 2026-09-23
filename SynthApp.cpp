@@ -725,7 +725,7 @@ int modulationForDestination(uint8_t destination) {
 uint8_t modulatedCutoffForOsc(uint8_t oscIndex) {
   int value = (int)oscEffectiveCutoff(oscIndex);
   value += modulationForDestination(MODDST_CUTOFF);
-  return clamp127(value);
+  return (uint8_t)constrain(value, 0, 127);
 }
 
 uint8_t lastLiveCutoffSent[3] = {255, 255, 255};
@@ -1892,7 +1892,7 @@ int map127ToSigned(uint8_t value, int minV, int maxV) {
 }
 
 uint8_t currentParamAs127(uint8_t knob) {
-  uint8_t page = configMode ? configPage : PAGE_PERF;
+  uint8_t page = configMode ? configPage : (uint8_t)PAGE_PERF;
 
   if (page == PAGE_PERF) {
     switch (knob) {
@@ -1952,7 +1952,7 @@ uint8_t currentParamAs127(uint8_t knob) {
     const ModRoute& route = currentPreset.routes[selectedRoute];
     switch (knob) {
       case 0: {
-        uint8_t src = (route.source <= MODSRC_ENV3) ? route.source : MODSRC_NONE;
+        uint8_t src = (route.source <= MODSRC_ENV3) ? route.source : (uint8_t)MODSRC_NONE;
         return (uint8_t)(((uint16_t)src * 127) / MODSRC_ENV3);
       }
       case 1: return route.destination == MODDST_CUTOFF ? 127 : 0;
@@ -1979,7 +1979,7 @@ uint8_t currentParamAs127(uint8_t knob) {
 }
 
 bool knobIsReserved(uint8_t knob) {
-  uint8_t page = configMode ? configPage : PAGE_PERF;
+  uint8_t page = configMode ? configPage : (uint8_t)PAGE_PERF;
 
   if (page >= PAGE_OSC1 && page <= PAGE_OSC3) return knob == 7;
   if (page == PAGE_ENV) return knob >= 6;
@@ -2440,7 +2440,7 @@ void applyRoutePageKnob(uint8_t knob, uint8_t v) {
 }
 
 void applyKnobValue(uint8_t knob, uint8_t value) {
-  uint8_t page = configMode ? configPage : PAGE_PERF;
+  uint8_t page = configMode ? configPage : (uint8_t)PAGE_PERF;
 
   if (page == PAGE_PERF) {
     applyPerformanceKnob(knob, value);

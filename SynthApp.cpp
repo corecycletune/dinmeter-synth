@@ -1516,6 +1516,9 @@ void applyModeAndGlideAll() {
       sendCC(OSC_CH[i], 65, 0);   // native Portamento Off
       setPitchBendRange(OSC_CH[i], SOFTWARE_GLIDE_BEND_RANGE);
     }
+    sendCC(GM_CH, 127, 0);
+    sendCC(GM_CH, 65, 0);
+    setPitchBendRange(GM_CH, SOFTWARE_GLIDE_BEND_RANGE);
     resetSoftwareBend(true);
     return;
   }
@@ -1526,6 +1529,9 @@ void applyModeAndGlideAll() {
   for (uint8_t i = 0; i < 3; ++i) {
     setPitchBendRange(OSC_CH[i], 2);
   }
+  sendCC(GM_CH, 127, 0);
+  sendCC(GM_CH, 65, 0);
+  setPitchBendRange(GM_CH, 2);
   resetSoftwareBend(true);
 }
 
@@ -1911,14 +1917,10 @@ void forwardSystemPacket(const uint8_t (&packet)[4]) {
 }
 
 void forwardCCToOscs(uint8_t cc, uint8_t value) {
-  if (isGmQuickBank()) {
-    sendCC(GM_CH, cc, value);
-    return;
-  }
-
   for (uint8_t i = 0; i < 3; ++i) {
     sendCC(OSC_CH[i], cc, value);
   }
+  if (currentGmLayer.level > 0) sendCC(GM_CH, cc, value);
 }
 
 // Used by incoming MIDI CC7 so the keyboard controls the same VOLUME state
@@ -1943,17 +1945,19 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
   }
 
   if (cin == 0xA) {
-    if (isGmQuickBank()) {
-      sendMidi3(0xA0 | GM_CH, packet[2] & 0x7F, packet[3] & 0x7F);
-      return;
-    }
-
     for (uint8_t i = 0; i < 3; ++i) {
       if (oscEnabled(i)) {
         int shifted = (int)(packet[2] & 0x7F) + currentPreset.osc[i].transpose;
         if (shifted >= 0 && shifted <= 127) {
           sendMidi3(0xA0 | OSC_CH[i], shifted, packet[3] & 0x7F);
         }
+      }
+    }
+
+    if (currentGmLayer.level > 0) {
+      int shifted = (int)(packet[2] & 0x7F) + currentGmLayer.transpose;
+      if (shifted >= 0 && shifted <= 127) {
+        sendMidi3(0xA0 | GM_CH, shifted, packet[3] & 0x7F);
       }
     }
     return;
@@ -2003,23 +2007,14 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
   if (cin == 0xC) return;
 
   if (cin == 0xD) {
-    if (isGmQuickBank()) {
-      sendMidi2(0xD0 | GM_CH, packet[2] & 0x7F);
-      return;
-    }
-
     for (uint8_t i = 0; i < 3; ++i) {
       if (oscEnabled(i)) sendMidi2(0xD0 | OSC_CH[i], packet[2] & 0x7F);
     }
+    if (currentGmLayer.level > 0) sendMidi2(0xD0 | GM_CH, packet[2] & 0x7F);
     return;
   }
 
   if (cin == 0xE) {
-    if (isGmQuickBank()) {
-      sendPitchBendRaw(GM_CH, packet[2], packet[3]);
-      return;
-    }
-
     // Software portamento owns Pitch Bend while a legato phrase is active.
     // Combining wheel bend with glide can be added later; for now avoid the
     // two controllers fighting over the same 14-bit bend value.
@@ -2027,6 +2022,9 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
 
     for (uint8_t i = 0; i < 3; ++i) {
       sendPitchBendRaw(OSC_CH[i], packet[2], packet[3]);
+    }
+    if (currentGmLayer.level > 0) {
+      sendPitchBendRaw(GM_CH, packet[2], packet[3]);
     }
     return;
   }

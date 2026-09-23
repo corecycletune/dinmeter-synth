@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.6
+  Version: v1.10.7
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -36,7 +36,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.6";
+  "DINMETER_FW_VERSION=v1.10.7";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -323,8 +323,24 @@ uint8_t masterVolume = 100;
 
 // Runtime-only states
 bool keyboardSustain = false;
-bool forceSustain    = false;
 bool recoveringFromPanic = false;
+
+bool configAuditionEnabled = false;
+bool configAuditionNoteOn = false;
+uint8_t configAuditionStep = 0;
+uint8_t configAuditionNote = 60;
+uint32_t configAuditionChangedAt = 0;
+
+static constexpr uint32_t CONFIG_AUDITION_NOTE_MS = 800;
+static constexpr uint32_t CONFIG_AUDITION_GAP_MS  = 800;
+static constexpr uint8_t CONFIG_AUDITION_VELOCITY = 96;
+
+// C2..C6 around middle C, deliberately moving up/down across the keyboard.
+static const uint8_t CONFIG_AUDITION_NOTES[] = {
+  60, 67, 72, 76, 60, 55, 48, 52, 60, 79, 43, 84, 36, 64
+};
+static constexpr uint8_t CONFIG_AUDITION_NOTE_COUNT =
+    sizeof(CONFIG_AUDITION_NOTES) / sizeof(CONFIG_AUDITION_NOTES[0]);
 
 // ======================================================================
 // Wave/material table
@@ -460,7 +476,7 @@ static const char* MOD_LABELS[8] = {
 };
 
 static const char* CONFIG_BUTTON_LABELS[8] = {
-  "MON", "GLD", "LEG", "SUS", "SFT", "REV", "VIB", "PAN"
+  "MON", "GLD", "LEG", "TST", "SFT", "REV", "VIB", "PAN"
 };
 
 // ======================================================================
@@ -1324,7 +1340,7 @@ void initModularDefaults(Preset& p) {
 }
 
 void migrateStoredPresetV1910(const StoredPresetV1910& oldPreset, Preset& out) {
-  // Preset keeps the entire v1.10.6 object as a byte-compatible prefix.
+  // Preset keeps the entire v1.10.7 object as a byte-compatible prefix.
   memcpy(&out, &oldPreset, sizeof(oldPreset));
   initModularDefaults(out);
 }
@@ -1612,7 +1628,7 @@ void applyModAll() {
 }
 
 bool effectiveSustain() {
-  return keyboardSustain || forceSustain;
+  return keyboardSustain;
 }
 
 void applyPedalsAll() {
@@ -1882,7 +1898,8 @@ void panicAll(const char* reason) {
   silenceSynthOnly();
   clearHeldState();
   keyboardSustain = false;
-  forceSustain = false;
+  configAuditionEnabled = false;
+  configAuditionNoteOn = false;
   recoveringFromPanic = true;
 
   snprintf(overlayTitle, sizeof(overlayTitle), "PANIC");
@@ -2030,6 +2047,95 @@ void handleNoteOff(uint8_t note, uint8_t velocity) {
   sendLayeredNote(0x80, note, 0);
   sendLayeredNote(0x90, (uint8_t)next, heldVelocity[next]);
   currentMonoNote = next;
+}
+
+// ======================================================================
+// CONFIG audition generator
+// ======================================================================
+
+void stopConfigAuditionNote() {
+  if (!configAuditionNoteOn) return;
+
+  sendLayeredNote(0x80, configAuditionNote, 0);
+  configAuditionNoteOn = false;
+
+  // The audition generator owns its own test phrase. If no real keyboard note
+  // is being held, let the modular envelopes enter release normally.
+  if (heldCount == 0) releaseModEnvelopes();
+}
+
+void startConfigAuditionNote(uint32_t nowMs) {
+  configAuditionNote =
+      CONFIG_AUDITION_NOTES[configAuditionStep % CONFIG_AUDITION_NOTE_COUNT];
+
+  // Treat every generated note as a fresh phrase for envelope auditioning.
+  // LFO modules with RTR off keep their phase; RTR on restarts as expected.
+  triggerModEnvelopes(true);
+  triggerModLfos(true);
+  sendLayeredNote(0x90, configAuditionNote, CONFIG_AUDITION_VELOCITY);
+
+  configAuditionNoteOn = true;
+  configAuditionChangedAt = nowMs;
+}
+
+void setConfigAuditionEnabled(bool enabled) {
+  if (enabled == configAuditionEnabled) return;
+
+  if (!enabled) {
+    stopConfigAuditionNote();
+    configAuditionEnabled = false;
+    configAuditionStep = 0;
+    screenDirty = true;
+    return;
+  }
+
+  configAuditionEnabled = true;
+  configAuditionStep = 0;
+  startConfigAuditionNote(millis());
+  screenDirty = true;
+}
+
+void updateConfigAudition() {
+  // CONFIG audition never leaks into PERFORMANCE, menus, Wi-Fi maintenance,
+  // or other modal screens.
+  bool allowed =
+      configMode &&
+      !wifiMaintActive() &&
+      !systemMenuActive &&
+      !wifiSelectActive &&
+      !wifiSetupMenuActive &&
+      !wifiScanListActive &&
+      !textEditorActive &&
+      !wifiDeleteListActive &&
+      !wifiDeleteConfirm &&
+      !saveDialog &&
+      !maintenanceConfirm &&
+      !systemInfoActive;
+
+  if (!allowed) {
+    if (configAuditionEnabled || configAuditionNoteOn) {
+      setConfigAuditionEnabled(false);
+    }
+    return;
+  }
+
+  if (!configAuditionEnabled) return;
+
+  uint32_t nowMs = millis();
+  uint32_t elapsed = nowMs - configAuditionChangedAt;
+
+  if (configAuditionNoteOn) {
+    if (elapsed < CONFIG_AUDITION_NOTE_MS) return;
+
+    stopConfigAuditionNote();
+    configAuditionChangedAt = nowMs;
+    return;
+  }
+
+  if (elapsed < CONFIG_AUDITION_GAP_MS) return;
+
+  configAuditionStep = (configAuditionStep + 1) % CONFIG_AUDITION_NOTE_COUNT;
+  startConfigAuditionNote(nowMs);
 }
 
 // ======================================================================
@@ -2991,6 +3097,10 @@ bool lastConfigRaw = false;
 void handleConfigModeChange(bool newMode) {
   if (newMode == configMode) return;
 
+  if (!newMode) {
+    setConfigAuditionEnabled(false);
+  }
+
   configMode = newMode;
   paramPopupActive = false;
 
@@ -3096,7 +3206,7 @@ void updateByteLeds() {
     (bool)currentPreset.mono,
     (bool)currentPreset.glide,
     (bool)currentPreset.legato,
-    forceSustain,
+    configAuditionEnabled,
     (bool)currentPreset.soft,
     (bool)currentPreset.reverbEnabled,
     (bool)currentPreset.vibratoEnabled
@@ -3138,10 +3248,8 @@ void toggleConfigButton(uint8_t logical) {
       markModified();
       break;
 
-    case 3: // SUSTAIN runtime only
-      forceSustain = !forceSustain;
-      applyPedalsAll();
-      screenDirty = true;
+    case 3: // CONFIG TEST / audition generator
+      setConfigAuditionEnabled(!configAuditionEnabled);
       break;
 
     case 4: // SOFT
@@ -3467,7 +3575,6 @@ void enterUsbFlashBootloader() {
   silenceSynthOnly();
   clearHeldState();
   keyboardSustain = false;
-  forceSustain = false;
 
   // Wi-Fi is normally already OFF outside MAINTENANCE, but make sure
   // no maintenance web runtime is left active.
@@ -3536,7 +3643,6 @@ void enterMaintenanceMode() {
   silenceSynthOnly();
   clearHeldState();
   keyboardSustain = false;
-  forceSustain = false;
 
   clearScreen();
   drawHazardStripe(0, 10);
@@ -3580,7 +3686,6 @@ void startWifiScanUi() {
   silenceSynthOnly();
   clearHeldState();
   keyboardSustain = false;
-  forceSustain = false;
 
   // Draw immediately because Wi-Fi scanning is synchronous for a few seconds.
   M5.Display.fillScreen(C_BLACK);
@@ -4686,7 +4791,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.6");
+  M5.Display.print("FW          : v1.10.7");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -4740,7 +4845,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.6  LATEST ");
+    M5.Display.print("FW v1.10.7  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -5148,7 +5253,7 @@ void drawConfigScreen() {
     (bool)currentPreset.mono,
     (bool)currentPreset.glide,
     (bool)currentPreset.legato,
-    forceSustain,
+    configAuditionEnabled,
     (bool)currentPreset.soft,
     (bool)currentPreset.reverbEnabled,
     (bool)currentPreset.vibratoEnabled
@@ -5388,7 +5493,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.6");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.7");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -5419,6 +5524,9 @@ void synthAppLoop() {
   // Critical: keep USB Host serviced continuously during normal operation.
   usbMidi.update();
 
+  // CONFIG can generate its own audition notes when no keyboard is attached.
+  updateConfigAudition();
+
   // DinMeter-owned time-domain modulators run independently of the slower UI
   // polling. The MIDI output side is rate-limited inside each engine.
   updateSoftwareGlide();
@@ -5439,7 +5547,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.6
+  Version: v1.10.7
   END
   ======================================================================
 */

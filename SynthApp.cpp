@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.10
+  Version: v1.10.0
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -28,13 +28,14 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <Preferences.h>
+#include <stddef.h>
 #include <esp_system.h>
 #include "esp32-hal-tinyusb.h"
 
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.9.10";
+  "DINMETER_FW_VERSION=v1.10.0";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -139,7 +140,109 @@ struct ModState {
   uint8_t configured;  // 0 = keep SAM default modulation mapping
 };
 
+// Stored v1.9.x layout. Keep this byte-for-byte compatible so presets already
+// saved in NVS can be migrated when the modular tail is introduced.
+struct StoredPresetV1910 {
+  char name[32];
+
+  OscState osc[3];
+
+  uint8_t cutoff;
+  uint8_t resonance;
+  uint8_t attack;
+  uint8_t decay;
+  uint8_t release;
+
+  uint8_t reverb;
+  uint8_t vibratoRate;
+  uint8_t vibratoDepth;
+  uint8_t vibratoDelay;
+  uint8_t glideTime;
+
+  uint8_t mono;
+  uint8_t glide;
+  uint8_t legato;
+  uint8_t soft;
+  uint8_t reverbEnabled;
+  uint8_t vibratoEnabled;
+
+  ModState mod;
+
+  uint8_t legacyChorusProgram;
+  uint8_t legacyChorusSend;
+  uint8_t legacySpatialVolume;
+  uint8_t legacySpatialDelay;
+};
+
+static constexpr uint8_t ENV_COUNT = 3;
+static constexpr uint8_t LFO_COUNT = 3;
+static constexpr uint8_t MOD_ROUTE_COUNT = 16;
+static constexpr uint8_t MODULAR_SCHEMA_VERSION = 1;
+
+enum EnvCurve : uint8_t {
+  ENV_CURVE_LINEAR = 0,
+  ENV_CURVE_EXP = 1,
+  ENV_CURVE_LOG = 2
+};
+
+enum LfoWaveform : uint8_t {
+  LFO_WAVE_SINE = 0,
+  LFO_WAVE_TRIANGLE = 1,
+  LFO_WAVE_SAW_UP = 2,
+  LFO_WAVE_SAW_DOWN = 3,
+  LFO_WAVE_SQUARE = 4,
+  LFO_WAVE_RANDOM = 5
+};
+
+enum ModSource : uint8_t {
+  MODSRC_NONE = 0,
+  MODSRC_ENV1 = 1,
+  MODSRC_ENV2 = 2,
+  MODSRC_ENV3 = 3,
+  MODSRC_LFO1 = 4,
+  MODSRC_LFO2 = 5,
+  MODSRC_LFO3 = 6,
+  MODSRC_VELOCITY = 7,
+  MODSRC_KEY = 8,
+  MODSRC_MODWHEEL = 9,
+  MODSRC_AFTERTOUCH = 10
+};
+
+enum ModDestination : uint8_t {
+  MODDST_NONE = 0,
+  MODDST_CUTOFF = 1,
+  MODDST_PITCH = 2,
+  MODDST_AMP = 3
+};
+
+struct EnvelopeState {
+  uint8_t attack;      // normalized 0..127; runtime maps this to time
+  uint8_t decay;       // normalized 0..127
+  uint8_t sustain;     // 0..127
+  uint8_t release;     // normalized 0..127
+  uint8_t curve;       // EnvCurve
+  uint8_t retrigger;   // 0 = legato/free, 1 = NoteOn retrigger
+};
+
+struct LfoState {
+  uint8_t waveform;    // LfoWaveform
+  uint8_t rate;        // normalized 0..127; runtime maps this to Hz
+  uint8_t delay;       // normalized 0..127
+  uint8_t fade;        // normalized 0..127
+  uint8_t retrigger;   // 0 = free-running, 1 = restart on NoteOn
+  uint8_t phase;       // startup phase 0..127
+};
+
+struct ModRoute {
+  uint8_t source;      // ModSource
+  uint8_t destination; // ModDestination
+  int8_t amount;       // bipolar -127..+127
+  uint8_t enabled;
+};
+
 struct Preset {
+  // IMPORTANT: everything above modularSchemaVersion must remain identical to
+  // StoredPresetV1910. This lets old saved presets migrate losslessly.
   char name[32];
 
   OscState osc[3];
@@ -170,7 +273,17 @@ struct Preset {
   uint8_t legacyChorusSend;
   uint8_t legacySpatialVolume;
   uint8_t legacySpatialDelay;
+
+  // v1.10 modular tail. These are currently data-only; the modulation engine
+  // will begin consuming them in later v1.10.x steps.
+  uint8_t modularSchemaVersion;
+  EnvelopeState env[ENV_COUNT];
+  LfoState lfo[LFO_COUNT];
+  ModRoute routes[MOD_ROUTE_COUNT];
 };
+
+static_assert(offsetof(Preset, modularSchemaVersion) == sizeof(StoredPresetV1910),
+              "Preset legacy prefix changed; NVS migration would break.");
 
 static constexpr uint8_t BANK_COUNT = 8;
 static constexpr uint8_t PRESETS_PER_BANK = 8;
@@ -726,6 +839,37 @@ uint8_t fineTuneValueFromCents(int cents) {
 // Default preset conversion / NVS
 // ======================================================================
 
+void initModularDefaults(Preset& p) {
+  p.modularSchemaVersion = MODULAR_SCHEMA_VERSION;
+
+  // ENV1 mirrors the legacy amp envelope so a later routing migration can
+  // preserve familiar behavior. ENV2/3 start neutral and unpatched.
+  p.env[0] = {p.attack, p.decay, 127, p.release, ENV_CURVE_LINEAR, 1};
+  p.env[1] = {0, 64, 0, 64, ENV_CURVE_LINEAR, 1};
+  p.env[2] = {0, 64, 0, 64, ENV_CURVE_LINEAR, 1};
+
+  // LFO1 mirrors legacy vibrato timing, but no modular route is enabled yet.
+  p.lfo[0] = {LFO_WAVE_SINE, p.vibratoRate, p.vibratoDelay, 0, 0, 0};
+  p.lfo[1] = {LFO_WAVE_TRIANGLE, 48, 0, 0, 0, 0};
+  p.lfo[2] = {LFO_WAVE_TRIANGLE, 48, 0, 0, 0, 0};
+
+  for (uint8_t i = 0; i < MOD_ROUTE_COUNT; ++i) {
+    p.routes[i] = {MODSRC_NONE, MODDST_NONE, 0, 0};
+  }
+}
+
+void migrateStoredPresetV1910(const StoredPresetV1910& oldPreset, Preset& out) {
+  // Preset keeps the entire v1.10.0 object as a byte-compatible prefix.
+  memcpy(&out, &oldPreset, sizeof(oldPreset));
+  initModularDefaults(out);
+}
+
+void ensureModularPresetValid(Preset& p) {
+  if (p.modularSchemaVersion != MODULAR_SCHEMA_VERSION) {
+    initModularDefaults(p);
+  }
+}
+
 Preset makeInitPreset(uint8_t index) {
   Preset p{};
   snprintf(p.name, sizeof(p.name), "INIT %02u", index);
@@ -759,6 +903,7 @@ Preset makeInitPreset(uint8_t index) {
   p.legacyChorusSend = 0;
   p.legacySpatialVolume = 0;
   p.legacySpatialDelay = 29;
+  initModularDefaults(p);
   return p;
 }
 
@@ -808,6 +953,7 @@ Preset makeDefaultPreset(uint8_t index) {
   p.legacyChorusSend = l.chorusSend;
   p.legacySpatialVolume = l.spatialVolume;
   p.legacySpatialDelay = l.spatialDelay;
+  initModularDefaults(p);
   return p;
 }
 
@@ -824,6 +970,14 @@ void loadPresetData(uint8_t index, Preset& out) {
   size_t len = prefs.getBytesLength(key);
   if (len == sizeof(Preset)) {
     prefs.getBytes(key, &out, sizeof(Preset));
+    ensureModularPresetValid(out);
+    return;
+  }
+
+  if (len == sizeof(StoredPresetV1910)) {
+    StoredPresetV1910 oldPreset{};
+    prefs.getBytes(key, &oldPreset, sizeof(oldPreset));
+    migrateStoredPresetV1910(oldPreset, out);
   }
 }
 
@@ -3573,7 +3727,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.9.10");
+  M5.Display.print("FW          : v1.10.0");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -3627,7 +3781,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.9.10  LATEST ");
+    M5.Display.print("FW v1.10.0  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -4168,7 +4322,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.9.10");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.0");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -4218,7 +4372,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.9.10
+  Version: v1.10.0
   END
   ======================================================================
 */

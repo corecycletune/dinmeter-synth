@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.4
+  Version: v1.10.5
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -35,7 +35,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.4";
+  "DINMETER_FW_VERSION=v1.10.5";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -291,7 +291,27 @@ static constexpr uint8_t PRESETS_PER_BANK = 8;
 static constexpr uint8_t GM_BANK_INDEX = BANK_COUNT - 1;
 static constexpr uint8_t PRESET_COUNT = BANK_COUNT * PRESETS_PER_BANK;
 
+static const char* BANK_SHORT_NAMES[BANK_COUNT] = {
+  "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "GM"
+};
+
+static const char* BANK_GROUP_NAMES[BANK_COUNT] = {
+  "BANK 1", "BANK 2", "BANK 3", "BANK 4",
+  "BANK 5", "BANK 6", "BANK 7", "BANK 8", "GM"
+};
+
+struct __attribute__((packed)) GmLayerState {
+  uint8_t version;
+  uint8_t program;
+  uint8_t level;
+  int8_t transpose;
+  uint8_t pan;
+};
+
+static constexpr uint8_t GM_LAYER_VERSION = 1;
+
 Preset currentPreset;
+GmLayerState currentGmLayer = {GM_LAYER_VERSION, 0, 0, 0, 64};
 
 uint8_t browseBank  = 0;  // encoder selects this bank
 uint8_t loadedBank  = 0;  // actually sounding bank
@@ -328,8 +348,8 @@ static const WaveMaterial WAVE_TABLE[8] = {
   {"HARM",   0, 31},
 };
 
-// Quick-access GM bank. These use a dedicated MIDI channel and do not use
-// OSC1..3, so the three synth layers remain OFF in this bank.
+// Bank 9 starts with these eight useful GM programs. The GM layer is not
+// restricted to them: GM CONFIG can select any standard program 1..128.
 struct GmQuickPreset {
   const char* name;
   uint8_t program;
@@ -346,12 +366,27 @@ static const GmQuickPreset GM_QUICK_PRESETS[PRESETS_PER_BANK] = {
   {"GM Saw Lead",   81},
 };
 
-bool isGmQuickBank() {
-  return loadedBank == GM_BANK_INDEX;
-}
+static const char* GM_PROGRAM_NAMES[128] = {
+  "GrandPno","BrightPno","EGrand","HonkyTonk","EPiano1","EPiano2","Harpsi","Clav",
+  "Celesta","Glock","MusicBox","Vibes","Marimba","Xylophone","TubBell","Dulcimer",
+  "DrawOrgan","PercOrgan","RockOrgan","ChurchOrg","ReedOrgan","Accordion","Harmonica","TangoAcc",
+  "NylonGtr","SteelGtr","JazzGtr","CleanGtr","MuteGtr","Overdrive","DistGtr","GtrHarm",
+  "AcBass","FingerBass","PickBass","Fretless","SlapBass1","SlapBass2","SynBass1","SynBass2",
+  "Violin","Viola","Cello","Contrabass","TremStr","PizzStr","Harp","Timpani",
+  "Strings1","Strings2","SynStr1","SynStr2","ChoirAah","VoiceOoh","SynVoice","OrchHit",
+  "Trumpet","Trombone","Tuba","MuteTrump","FrenchHorn","Brass1","SynBrass1","SynBrass2",
+  "SopSax","AltoSax","TenorSax","BariSax","Oboe","EngHorn","Bassoon","Clarinet",
+  "Piccolo","Flute","Recorder","PanFlute","Bottle","Shakuhachi","Whistle","Ocarina",
+  "SquareLead","SawLead","Calliope","ChiffLead","Charang","VoiceLead","Fifths","BassLead",
+  "NewAgePad","WarmPad","PolyPad","ChoirPad","BowedPad","MetalPad","HaloPad","SweepPad",
+  "RainFX","Soundtrack","Crystal","Atmosphere","Brightness","Goblins","Echoes","SciFi",
+  "Sitar","Banjo","Shamisen","Koto","Kalimba","Bagpipe","Fiddle","Shanai",
+  "TinkleBell","Agogo","SteelDrum","Woodblock","Taiko","MelodTom","SynDrum","RevCymbal",
+  "FretNoise","Breath","Seashore","Bird","Telephone","Helicopter","Applause","Gunshot"
+};
 
-uint8_t gmQuickProgram() {
-  return GM_QUICK_PRESETS[loadedSlot % PRESETS_PER_BANK].program;
+const char* gmProgramName(uint8_t program) {
+  return GM_PROGRAM_NAMES[program & 0x7F];
 }
 
 // ======================================================================
@@ -365,6 +400,7 @@ enum ConfigPage : uint8_t {
   PAGE_OSC1,
   PAGE_OSC2,
   PAGE_OSC3,
+  PAGE_GM,
   PAGE_ENV,
   PAGE_ROUTE,
   PAGE_MOD,
@@ -378,11 +414,11 @@ uint8_t selectedRoute = 0;
 
 static const char* PAGE_NAMES[PAGE_COUNT] = {
   "PERFORMANCE", "TONE / FX", "VOICE ENV", "OSC 1", "OSC 2", "OSC 3",
-  "MOD ENV", "ROUTE", "MOD"
+  "GM LAYER", "MOD ENV", "ROUTE", "MOD"
 };
 
 static const char* PAGE_TAB[PAGE_COUNT] = {
-  "PF", "TN", "VN", "O1", "O2", "O3", "EN", "RT", "MD"
+  "PF", "TN", "VN", "O1", "O2", "O3", "GM", "EN", "RT", "MD"
 };
 
 static const char* PERF_LABELS[8] = {
@@ -399,6 +435,10 @@ static const char* VOICE_ENV_LABELS[8] = {
 
 static const char* OSC_LABELS[8] = {
   "WAV", "LVL", "OCT", "DET", "CUT", "RES", "PAN", "---"
+};
+
+static const char* GM_LABELS[8] = {
+  "PRG", "LVL", "OCT", "PAN", "---", "---", "---", "---"
 };
 
 static const char* ENV_LABELS[8] = {
@@ -983,6 +1023,7 @@ void sendSoftwareBendAll(int bend) {
       sendPitchBend14(OSC_CH[i], bend);
     }
   }
+  if (currentGmLayer.level > 0) sendPitchBend14(GM_CH, bend);
 }
 
 void resetSoftwareBend(bool sendNow = true) {
@@ -1137,7 +1178,7 @@ void initModularDefaults(Preset& p) {
 }
 
 void migrateStoredPresetV1910(const StoredPresetV1910& oldPreset, Preset& out) {
-  // Preset keeps the entire v1.10.4 object as a byte-compatible prefix.
+  // Preset keeps the entire v1.10.5 object as a byte-compatible prefix.
   memcpy(&out, &oldPreset, sizeof(oldPreset));
   initModularDefaults(out);
 }
@@ -1279,6 +1320,47 @@ void presetKey(uint8_t index, char* out, size_t outSize) {
   snprintf(out, outSize, "p%02u", index);
 }
 
+void gmLayerKey(uint8_t index, char* out, size_t outSize) {
+  snprintf(out, outSize, "g%02u", index);
+}
+
+GmLayerState defaultGmLayer(uint8_t index) {
+  GmLayerState state = {GM_LAYER_VERSION, 0, 0, 0, 64};
+  const uint8_t gmStart = GM_BANK_INDEX * PRESETS_PER_BANK;
+
+  if (index >= gmStart && index < PRESET_COUNT) {
+    uint8_t slot = index - gmStart;
+    state.program = GM_QUICK_PRESETS[slot].program;
+    state.level = 127;
+  }
+
+  return state;
+}
+
+void loadGmLayerData(uint8_t index, GmLayerState& out) {
+  out = defaultGmLayer(index);
+
+  char key[8];
+  gmLayerKey(index, key, sizeof(key));
+  if (prefs.getBytesLength(key) != sizeof(GmLayerState)) return;
+
+  GmLayerState stored{};
+  prefs.getBytes(key, &stored, sizeof(stored));
+  if (stored.version != GM_LAYER_VERSION) return;
+
+  stored.program &= 0x7F;
+  stored.level &= 0x7F;
+  stored.transpose = constrain((int)stored.transpose, -48, 48);
+  stored.pan &= 0x7F;
+  out = stored;
+}
+
+void saveGmLayerData(uint8_t index, const GmLayerState& state) {
+  char key[8];
+  gmLayerKey(index, key, sizeof(key));
+  prefs.putBytes(key, &state, sizeof(state));
+}
+
 bool allOscillatorsSilent(const Preset& p) {
   return p.osc[0].level == 0 && p.osc[1].level == 0 && p.osc[2].level == 0;
 }
@@ -1296,11 +1378,6 @@ void recoverAccidentallySilentFactoryPreset(uint8_t index, Preset& out) {
 
 void loadPresetData(uint8_t index, Preset& out) {
   out = makeDefaultPreset(index);
-
-  const uint8_t gmStart = GM_BANK_INDEX * PRESETS_PER_BANK;
-  if (index >= gmStart && index < PRESET_COUNT) {
-    return;
-  }
 
   char key[8];
   presetKey(index, key, sizeof(key));
@@ -1325,6 +1402,7 @@ void saveCurrentPreset() {
   char key[8];
   presetKey(currentPresetIndex(), key, sizeof(key));
   prefs.putBytes(key, &currentPreset, sizeof(Preset));
+  saveGmLayerData(currentPresetIndex(), currentGmLayer);
   modified = false;
   screenDirty = true;
 }
@@ -1395,16 +1473,12 @@ void applyPedalsAll() {
   uint8_t sustainValue = effectiveSustain() ? 127 : 0;
   uint8_t softValue = currentPreset.soft ? 127 : 0;
 
-  if (isGmQuickBank()) {
-    sendCC(GM_CH, 64, sustainValue);
-    sendCC(GM_CH, 67, softValue);
-    return;
-  }
-
   for (uint8_t i = 0; i < 3; ++i) {
     sendCC(OSC_CH[i], 64, sustainValue);
     sendCC(OSC_CH[i], 67, softValue);
   }
+  sendCC(GM_CH, 64, sustainValue);
+  sendCC(GM_CH, 67, softValue);
 }
 
 void applyMonoModeAll() {
@@ -1442,6 +1516,9 @@ void applyModeAndGlideAll() {
       sendCC(OSC_CH[i], 65, 0);   // native Portamento Off
       setPitchBendRange(OSC_CH[i], SOFTWARE_GLIDE_BEND_RANGE);
     }
+    sendCC(GM_CH, 127, 0);
+    sendCC(GM_CH, 65, 0);
+    setPitchBendRange(GM_CH, SOFTWARE_GLIDE_BEND_RANGE);
     resetSoftwareBend(true);
     return;
   }
@@ -1452,6 +1529,9 @@ void applyModeAndGlideAll() {
   for (uint8_t i = 0; i < 3; ++i) {
     setPitchBendRange(OSC_CH[i], 2);
   }
+  sendCC(GM_CH, 127, 0);
+  sendCC(GM_CH, 65, 0);
+  setPitchBendRange(GM_CH, 2);
   resetSoftwareBend(true);
 }
 
@@ -1476,19 +1556,19 @@ void applyOscStatic(uint8_t oscIndex) {
   sendCC(ch, 93, currentPreset.legacyChorusSend);
 }
 
-void configureGmQuickChannel() {
-  // Dedicated, plain GM playback path. Reset controller state so switching
-  // back into the GM bank is predictable and independent of OSC1..3.
+void applyGmLayerStatic() {
+  // A dedicated bank-0 GM layer that can be mixed with OSC1..3.
   sendCC(GM_CH, 120, 0);
   sendCC(GM_CH, 121, 0);
   sendCC(GM_CH, 0, 0);
   sendCC(GM_CH, 32, 0);
-  sendProgram(GM_CH, gmQuickProgram());
+  sendProgram(GM_CH, currentGmLayer.program);
   delay(2);
-  synth.setVolume(GM_CH, 127);
-  synth.setPan(GM_CH, 64);
-  sendCC(GM_CH, 127, 0); // Poly Mode On
-  sendCC(GM_CH, 65, 0);  // Portamento Off
+  synth.setVolume(GM_CH, currentGmLayer.level);
+  synth.setPan(GM_CH, currentGmLayer.pan);
+  setPitchBendRange(GM_CH, softwareMonoVoiceActive() ? SOFTWARE_GLIDE_BEND_RANGE : 2);
+  sendCC(GM_CH, 127, 0); // DinMeter note manager owns mono behavior
+  sendCC(GM_CH, 65, 0);  // software glide owns portamento
   sendPitchBendRaw(GM_CH, 0, 64);
   sendCC(GM_CH, 64, effectiveSustain() ? 127 : 0);
   sendCC(GM_CH, 67, currentPreset.soft ? 127 : 0);
@@ -1564,26 +1644,24 @@ void sendOscNote(uint8_t oscIndex, uint8_t messageType, uint8_t inputNote, uint8
             velocity & 0x7F);
 }
 
+void sendGmLayerNote(uint8_t messageType, uint8_t inputNote, uint8_t velocity) {
+  if (currentGmLayer.level == 0) return;
+
+  int note = (int)inputNote + currentGmLayer.transpose;
+  if (note < 0 || note > 127) return;
+
+  sendMidi3(messageType | (GM_CH & 0x0F), note & 0x7F, velocity & 0x7F);
+}
+
 void sendLayeredNote(uint8_t messageType, uint8_t inputNote, uint8_t velocity) {
   for (uint8_t i = 0; i < 3; ++i) {
     sendOscNote(i, messageType, inputNote, velocity);
   }
-}
-
-void sendGmQuickNote(uint8_t messageType, uint8_t note, uint8_t velocity) {
-  sendMidi3(messageType | (GM_CH & 0x0F), note & 0x7F, velocity & 0x7F);
+  sendGmLayerNote(messageType, inputNote, velocity);
 }
 
 void rebuildHeldNotes() {
   currentMonoNote = -1;
-
-  if (isGmQuickBank()) {
-    for (uint8_t i = 0; i < heldCount; ++i) {
-      uint8_t n = noteOrder[i];
-      if (heldInput[n]) sendGmQuickNote(0x90, n, heldVelocity[n]);
-    }
-    return;
-  }
   monoAnchorNote = -1;
   monoTargetNote = -1;
   resetSoftwareBend(true);
@@ -1624,12 +1702,6 @@ void applyCurrentPresetToSynth(bool rebuildNotes = true) {
 
   applyMasterVolume();
 
-  if (isGmQuickBank()) {
-    configureGmQuickChannel();
-    if (rebuildNotes) rebuildHeldNotes();
-    return;
-  }
-
   configureLegacyEffects(currentPreset.legacyChorusSend > 0,
                          currentPreset.legacySpatialVolume > 0);
 
@@ -1643,6 +1715,7 @@ void applyCurrentPresetToSynth(bool rebuildNotes = true) {
   for (uint8_t i = 0; i < 3; ++i) {
     applyOscStatic(i);
   }
+  applyGmLayerStatic();
 
   applyFilterAll();
   applyEnvelopeAll();
@@ -1697,11 +1770,6 @@ void handleNoteOn(uint8_t note, uint8_t velocity) {
   heldInput[note] = true;
   heldVelocity[note] = velocity;
   pushNoteOrder(note);
-
-  if (isGmQuickBank()) {
-    sendGmQuickNote(0x90, note, velocity);
-    return;
-  }
 
   const bool phraseStart = (heldCount == 1);
   triggerModEnvelopes(phraseStart);
@@ -1759,11 +1827,6 @@ void handleNoteOff(uint8_t note, uint8_t velocity) {
   heldInput[note] = false;
   heldVelocity[note] = 0;
   removeNoteOrder(note);
-
-  if (isGmQuickBank()) {
-    sendGmQuickNote(0x80, note, velocity);
-    return;
-  }
 
   if (heldCount == 0) {
     releaseModEnvelopes();
@@ -1854,14 +1917,10 @@ void forwardSystemPacket(const uint8_t (&packet)[4]) {
 }
 
 void forwardCCToOscs(uint8_t cc, uint8_t value) {
-  if (isGmQuickBank()) {
-    sendCC(GM_CH, cc, value);
-    return;
-  }
-
   for (uint8_t i = 0; i < 3; ++i) {
     sendCC(OSC_CH[i], cc, value);
   }
+  if (currentGmLayer.level > 0) sendCC(GM_CH, cc, value);
 }
 
 // Used by incoming MIDI CC7 so the keyboard controls the same VOLUME state
@@ -1886,17 +1945,19 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
   }
 
   if (cin == 0xA) {
-    if (isGmQuickBank()) {
-      sendMidi3(0xA0 | GM_CH, packet[2] & 0x7F, packet[3] & 0x7F);
-      return;
-    }
-
     for (uint8_t i = 0; i < 3; ++i) {
       if (oscEnabled(i)) {
         int shifted = (int)(packet[2] & 0x7F) + currentPreset.osc[i].transpose;
         if (shifted >= 0 && shifted <= 127) {
           sendMidi3(0xA0 | OSC_CH[i], shifted, packet[3] & 0x7F);
         }
+      }
+    }
+
+    if (currentGmLayer.level > 0) {
+      int shifted = (int)(packet[2] & 0x7F) + currentGmLayer.transpose;
+      if (shifted >= 0 && shifted <= 127) {
+        sendMidi3(0xA0 | GM_CH, shifted, packet[3] & 0x7F);
       }
     }
     return;
@@ -1946,23 +2007,14 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
   if (cin == 0xC) return;
 
   if (cin == 0xD) {
-    if (isGmQuickBank()) {
-      sendMidi2(0xD0 | GM_CH, packet[2] & 0x7F);
-      return;
-    }
-
     for (uint8_t i = 0; i < 3; ++i) {
       if (oscEnabled(i)) sendMidi2(0xD0 | OSC_CH[i], packet[2] & 0x7F);
     }
+    if (currentGmLayer.level > 0) sendMidi2(0xD0 | GM_CH, packet[2] & 0x7F);
     return;
   }
 
   if (cin == 0xE) {
-    if (isGmQuickBank()) {
-      sendPitchBendRaw(GM_CH, packet[2], packet[3]);
-      return;
-    }
-
     // Software portamento owns Pitch Bend while a legato phrase is active.
     // Combining wheel bend with glide can be added later; for now avoid the
     // two controllers fighting over the same 14-bit bend value.
@@ -1970,6 +2022,9 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
 
     for (uint8_t i = 0; i < 3; ++i) {
       sendPitchBendRaw(OSC_CH[i], packet[2], packet[3]);
+    }
+    if (currentGmLayer.level > 0) {
+      sendPitchBendRaw(GM_CH, packet[2], packet[3]);
     }
     return;
   }
@@ -2017,9 +2072,10 @@ void loadPreset(uint8_t bank, uint8_t slot) {
   browseBank = bank;
 
   loadPresetData(currentPresetIndex(), currentPreset);
+  loadGmLayerData(currentPresetIndex(), currentGmLayer);
 
-  // PERFORMANCE physical Portamento knob is authoritative for synth banks.
-  if (!configMode && !isGmQuickBank()) {
+  // PERFORMANCE physical Portamento knob is authoritative.
+  if (!configMode) {
     uint16_t portRaw = angle8.getAnalogInput(6, _12bit);
     uint8_t portV = rawTo127(portRaw, 6);
     bool physicalOn = (portV >= 64);
@@ -2112,6 +2168,16 @@ uint8_t currentParamAs127(uint8_t knob) {
     }
   }
 
+  if (page == PAGE_GM) {
+    switch (knob) {
+      case 0: return currentGmLayer.program;
+      case 1: return currentGmLayer.level;
+      case 2: return mapSignedTo127(currentGmLayer.transpose, -48, 48);
+      case 3: return currentGmLayer.pan;
+      default: return 0;
+    }
+  }
+
   if (page == PAGE_ENV) {
     const EnvelopeState& env = currentPreset.env[selectedEnv];
     switch (knob) {
@@ -2161,6 +2227,7 @@ bool knobIsReserved(uint8_t knob) {
   if (page == PAGE_FILTER_ENV) return knob >= 5;
   if (page == PAGE_VOICE_ENV) return knob >= 3;
   if (page >= PAGE_OSC1 && page <= PAGE_OSC3) return knob == 7;
+  if (page == PAGE_GM) return knob >= 4;
   if (page == PAGE_ENV) return knob >= 6;
   if (page == PAGE_ROUTE) return knob >= 4;
 
@@ -2245,14 +2312,6 @@ bool physicalPortamentoState(uint8_t v, bool currentState) {
 }
 
 void setPortamentoFromPhysical(uint8_t v, bool showPopup) {
-  if (isGmQuickBank()) {
-    currentPreset.glide = 0;
-    currentPreset.mono = 0;
-    if (showPopup) setParamPopup("PORTAMENTO", "GM: OFF");
-    screenDirty = true;
-    return;
-  }
-
   bool next = physicalPortamentoState(v, currentPreset.glide != 0);
   if (next == (currentPreset.glide != 0)) return;
 
@@ -2542,6 +2601,63 @@ void applyOscPageKnob(uint8_t page, uint8_t knob, uint8_t v) {
   if (changed) markModified();
 }
 
+void applyGmPageKnob(uint8_t knob, uint8_t v) {
+  bool changed = false;
+
+  switch (knob) {
+    case 0:
+      if (currentGmLayer.program != v) {
+        currentGmLayer.program = v;
+        changed = true;
+        reapplyAndRebuild();
+
+        char title[16];
+        snprintf(title, sizeof(title), "GM %03u", v + 1);
+        setParamPopup(title, gmProgramName(v));
+      }
+      break;
+
+    case 1: {
+      uint8_t oldLevel = currentGmLayer.level;
+      if (oldLevel != v) {
+        currentGmLayer.level = v;
+        changed = true;
+        if ((oldLevel == 0) != (v == 0)) {
+          reapplyAndRebuild();
+        } else {
+          synth.setVolume(GM_CH, currentGmLayer.level);
+        }
+      }
+      break;
+    }
+
+    case 2: {
+      uint8_t idx = (uint8_t)(((uint16_t)v * 9) / 128);
+      if (idx > 8) idx = 8;
+      int8_t trans = ((int)idx - 4) * 12;
+      if (currentGmLayer.transpose != trans) {
+        currentGmLayer.transpose = trans;
+        changed = true;
+        reapplyAndRebuild();
+      }
+      break;
+    }
+
+    case 3:
+      if (currentGmLayer.pan != v) {
+        currentGmLayer.pan = v;
+        synth.setPan(GM_CH, currentGmLayer.pan);
+        changed = true;
+      }
+      break;
+
+    default:
+      return;
+  }
+
+  if (changed) markModified();
+}
+
 void applyModPageKnob(uint8_t knob, uint8_t v) {
   bool changed = false;
 
@@ -2655,6 +2771,8 @@ void applyKnobValue(uint8_t knob, uint8_t value) {
     applyVoiceEnvPageKnob(knob, value);
   } else if (page >= PAGE_OSC1 && page <= PAGE_OSC3) {
     applyOscPageKnob(page, knob, value);
+  } else if (page == PAGE_GM) {
+    applyGmPageKnob(knob, value);
   } else if (page == PAGE_ENV) {
     applyEnvPageKnob(knob, value);
   } else if (page == PAGE_ROUTE) {
@@ -3500,11 +3618,7 @@ void handleEncoderRotate(int detents) {
     updateByteLeds();
 
     snprintf(overlayTitle, sizeof(overlayTitle), "BANK SELECT");
-    if (browseBank == GM_BANK_INDEX) {
-      snprintf(overlaySub, sizeof(overlaySub), "BANK %u / GM", browseBank + 1);
-    } else {
-      snprintf(overlaySub, sizeof(overlaySub), "BANK %u", browseBank + 1);
-    }
+    snprintf(overlaySub, sizeof(overlaySub), "%s", BANK_GROUP_NAMES[browseBank]);
     overlayActive = true;
     overlayUntil = millis() + 1200;
     screenDirty = true;
@@ -4349,7 +4463,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.4");
+  M5.Display.print("FW          : v1.10.5");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -4403,7 +4517,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.4  LATEST ");
+    M5.Display.print("FW v1.10.5  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -4532,7 +4646,7 @@ void drawPerformanceScreen() {
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(C_YELLOW, C_BLACK);
   M5.Display.setCursor(x0 + 6, 13);
-  M5.Display.printf("B%u", browseBank + 1);
+  M5.Display.print(BANK_SHORT_NAMES[browseBank]);
 
   M5.Display.setCursor(x0 + 34, 13);
   M5.Display.setTextColor(C_WHITE, C_BLACK);
@@ -4606,6 +4720,7 @@ const char** labelsForPage(uint8_t page) {
   if (page == PAGE_FILTER_ENV) return FILTER_LABELS;
   if (page == PAGE_VOICE_ENV) return VOICE_ENV_LABELS;
   if (page >= PAGE_OSC1 && page <= PAGE_OSC3) return OSC_LABELS;
+  if (page == PAGE_GM) return GM_LABELS;
   if (page == PAGE_ENV) return ENV_LABELS;
   if (page == PAGE_ROUTE) return ROUTE_LABELS;
   return MOD_LABELS;
@@ -4631,6 +4746,16 @@ void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
       page == PAGE_VOICE_ENV || page == PAGE_MOD) {
     snprintf(out, n, "%u", currentParamAs127(knob));
     return;
+  }
+
+  if (page == PAGE_GM) {
+    switch (knob) {
+      case 0: snprintf(out, n, "%03u", currentGmLayer.program + 1); return;
+      case 1: snprintf(out, n, "%u", currentGmLayer.level); return;
+      case 2: snprintf(out, n, "%+d", currentGmLayer.transpose / 12); return;
+      case 3: snprintf(out, n, "%u", currentGmLayer.pan); return;
+      default: snprintf(out, n, "-"); return;
+    }
   }
 
   if (page == PAGE_ENV) {
@@ -4727,7 +4852,11 @@ void drawConfigScreen() {
   M5.Display.setTextSize(1);
   M5.Display.setCursor(x0 + 5, 20);
 
-  if (configPage == PAGE_ENV) {
+  if (configPage == PAGE_GM) {
+    M5.Display.printf("GM %03u %.11s",
+                      currentGmLayer.program + 1,
+                      gmProgramName(currentGmLayer.program));
+  } else if (configPage == PAGE_ENV) {
     M5.Display.printf("CONFIG // ENV %u/%u", selectedEnv + 1, ENV_COUNT);
   } else if (configPage == PAGE_ROUTE) {
     M5.Display.printf("CONFIG // ROUTE %02u/%02u",
@@ -4967,6 +5096,7 @@ void synthAppSetup() {
   browseBank = loadedBank;
 
   loadPresetData(currentPresetIndex(), currentPreset);
+  loadGmLayerData(currentPresetIndex(), currentGmLayer);
 
   // Current physical volume is authoritative at boot.
   uint16_t volRaw = angle8.getAnalogInput(0, _12bit);
@@ -5001,7 +5131,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.4");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.5");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -5052,7 +5182,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.4
+  Version: v1.10.5
   END
   ======================================================================
 */

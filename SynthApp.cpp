@@ -1023,6 +1023,7 @@ void sendSoftwareBendAll(int bend) {
       sendPitchBend14(OSC_CH[i], bend);
     }
   }
+  if (currentGmLayer.level > 0) sendPitchBend14(GM_CH, bend);
 }
 
 void resetSoftwareBend(bool sendNow = true) {
@@ -1472,16 +1473,12 @@ void applyPedalsAll() {
   uint8_t sustainValue = effectiveSustain() ? 127 : 0;
   uint8_t softValue = currentPreset.soft ? 127 : 0;
 
-  if (isGmQuickBank()) {
-    sendCC(GM_CH, 64, sustainValue);
-    sendCC(GM_CH, 67, softValue);
-    return;
-  }
-
   for (uint8_t i = 0; i < 3; ++i) {
     sendCC(OSC_CH[i], 64, sustainValue);
     sendCC(OSC_CH[i], 67, softValue);
   }
+  sendCC(GM_CH, 64, sustainValue);
+  sendCC(GM_CH, 67, softValue);
 }
 
 void applyMonoModeAll() {
@@ -1553,19 +1550,19 @@ void applyOscStatic(uint8_t oscIndex) {
   sendCC(ch, 93, currentPreset.legacyChorusSend);
 }
 
-void configureGmQuickChannel() {
-  // Dedicated, plain GM playback path. Reset controller state so switching
-  // back into the GM bank is predictable and independent of OSC1..3.
+void applyGmLayerStatic() {
+  // A dedicated bank-0 GM layer that can be mixed with OSC1..3.
   sendCC(GM_CH, 120, 0);
   sendCC(GM_CH, 121, 0);
   sendCC(GM_CH, 0, 0);
   sendCC(GM_CH, 32, 0);
-  sendProgram(GM_CH, gmQuickProgram());
+  sendProgram(GM_CH, currentGmLayer.program);
   delay(2);
-  synth.setVolume(GM_CH, 127);
-  synth.setPan(GM_CH, 64);
-  sendCC(GM_CH, 127, 0); // Poly Mode On
-  sendCC(GM_CH, 65, 0);  // Portamento Off
+  synth.setVolume(GM_CH, currentGmLayer.level);
+  synth.setPan(GM_CH, currentGmLayer.pan);
+  setPitchBendRange(GM_CH, softwareMonoVoiceActive() ? SOFTWARE_GLIDE_BEND_RANGE : 2);
+  sendCC(GM_CH, 127, 0); // DinMeter note manager owns mono behavior
+  sendCC(GM_CH, 65, 0);  // software glide owns portamento
   sendPitchBendRaw(GM_CH, 0, 64);
   sendCC(GM_CH, 64, effectiveSustain() ? 127 : 0);
   sendCC(GM_CH, 67, currentPreset.soft ? 127 : 0);
@@ -1641,26 +1638,24 @@ void sendOscNote(uint8_t oscIndex, uint8_t messageType, uint8_t inputNote, uint8
             velocity & 0x7F);
 }
 
+void sendGmLayerNote(uint8_t messageType, uint8_t inputNote, uint8_t velocity) {
+  if (currentGmLayer.level == 0) return;
+
+  int note = (int)inputNote + currentGmLayer.transpose;
+  if (note < 0 || note > 127) return;
+
+  sendMidi3(messageType | (GM_CH & 0x0F), note & 0x7F, velocity & 0x7F);
+}
+
 void sendLayeredNote(uint8_t messageType, uint8_t inputNote, uint8_t velocity) {
   for (uint8_t i = 0; i < 3; ++i) {
     sendOscNote(i, messageType, inputNote, velocity);
   }
-}
-
-void sendGmQuickNote(uint8_t messageType, uint8_t note, uint8_t velocity) {
-  sendMidi3(messageType | (GM_CH & 0x0F), note & 0x7F, velocity & 0x7F);
+  sendGmLayerNote(messageType, inputNote, velocity);
 }
 
 void rebuildHeldNotes() {
   currentMonoNote = -1;
-
-  if (isGmQuickBank()) {
-    for (uint8_t i = 0; i < heldCount; ++i) {
-      uint8_t n = noteOrder[i];
-      if (heldInput[n]) sendGmQuickNote(0x90, n, heldVelocity[n]);
-    }
-    return;
-  }
   monoAnchorNote = -1;
   monoTargetNote = -1;
   resetSoftwareBend(true);
@@ -1701,12 +1696,6 @@ void applyCurrentPresetToSynth(bool rebuildNotes = true) {
 
   applyMasterVolume();
 
-  if (isGmQuickBank()) {
-    configureGmQuickChannel();
-    if (rebuildNotes) rebuildHeldNotes();
-    return;
-  }
-
   configureLegacyEffects(currentPreset.legacyChorusSend > 0,
                          currentPreset.legacySpatialVolume > 0);
 
@@ -1720,6 +1709,7 @@ void applyCurrentPresetToSynth(bool rebuildNotes = true) {
   for (uint8_t i = 0; i < 3; ++i) {
     applyOscStatic(i);
   }
+  applyGmLayerStatic();
 
   applyFilterAll();
   applyEnvelopeAll();
@@ -1774,11 +1764,6 @@ void handleNoteOn(uint8_t note, uint8_t velocity) {
   heldInput[note] = true;
   heldVelocity[note] = velocity;
   pushNoteOrder(note);
-
-  if (isGmQuickBank()) {
-    sendGmQuickNote(0x90, note, velocity);
-    return;
-  }
 
   const bool phraseStart = (heldCount == 1);
   triggerModEnvelopes(phraseStart);
@@ -1836,11 +1821,6 @@ void handleNoteOff(uint8_t note, uint8_t velocity) {
   heldInput[note] = false;
   heldVelocity[note] = 0;
   removeNoteOrder(note);
-
-  if (isGmQuickBank()) {
-    sendGmQuickNote(0x80, note, velocity);
-    return;
-  }
 
   if (heldCount == 0) {
     releaseModEnvelopes();
@@ -2322,14 +2302,6 @@ bool physicalPortamentoState(uint8_t v, bool currentState) {
 }
 
 void setPortamentoFromPhysical(uint8_t v, bool showPopup) {
-  if (isGmQuickBank()) {
-    currentPreset.glide = 0;
-    currentPreset.mono = 0;
-    if (showPopup) setParamPopup("PORTAMENTO", "GM: OFF");
-    screenDirty = true;
-    return;
-  }
-
   bool next = physicalPortamentoState(v, currentPreset.glide != 0);
   if (next == (currentPreset.glide != 0)) return;
 

@@ -522,7 +522,7 @@ struct LfoRuntime {
 EnvRuntime envRuntime[ENV_COUNT] = {};
 LfoRuntime lfoRuntime[LFO_COUNT] = {};
 uint32_t lastModOutputAt = 0;
-static constexpr uint32_t MOD_OUTPUT_INTERVAL_MS = 24; // ~42 Hz max GS updates
+static constexpr uint32_t MOD_OUTPUT_INTERVAL_MS = 32; // ~31 Hz, leaves MIDI headroom
 
 void resetLfoRuntime() {
   uint32_t nowMs = millis();
@@ -561,6 +561,7 @@ int16_t monoTargetNote = -1;       // last-note-priority destination
 int16_t monoBendCurrent = 8192;    // 14-bit MIDI Pitch Bend
 int16_t monoBendStart = 8192;
 int16_t monoBendTarget = 8192;
+int16_t performanceBendCurrent = 8192; // external pitch wheel when glide is inactive
 uint32_t monoGlideStartedAt = 0;
 uint32_t monoGlideDurationMs = 0;
 uint32_t monoGlideLastSendAt = 0;
@@ -849,6 +850,74 @@ int modulationForDestination(uint8_t destination) {
   }
 
   return total;
+}
+
+bool modulationSourceIsEnvelope(uint8_t source) {
+  return source >= MODSRC_ENV1 && source <= MODSRC_ENV3;
+}
+
+uint8_t modulatedAmpLevel(uint8_t baseLevel) {
+  int level = baseLevel;
+
+  for (uint8_t i = 0; i < MOD_ROUTE_COUNT; ++i) {
+    const ModRoute& route = currentPreset.routes[i];
+    if (!route.enabled || route.destination != MODDST_AMP) continue;
+    if (route.source == MODSRC_NONE) continue;
+
+    int source = modulationSourceValue(route.source);
+    int amount = route.amount;
+    int factor = 127; // unity
+
+    if (modulationSourceIsEnvelope(route.source)) {
+      // Positive ENV amount behaves like a VCA envelope:
+      // +127 => ENV 0..127 maps gain 0..1.
+      // Negative amount produces the inverse contour.
+      if (amount >= 0) {
+        factor = 127 - amount + (source * amount) / 127;
+      } else {
+        int depth = -amount;
+        factor = 127 - (source * depth) / 127;
+      }
+    } else {
+      // Bipolar sources such as LFO act as tremolo around unity.
+      factor = 127 + (source * amount) / 127;
+    }
+
+    factor = constrain(factor, 0, 254);
+    level = constrain((level * factor + 63) / 127, 0, 127);
+  }
+
+  return (uint8_t)level;
+}
+
+uint8_t lastLiveAmpSent[4] = {255, 255, 255, 255};
+
+void invalidateLiveAmpCache() {
+  for (uint8_t i = 0; i < 4; ++i) lastLiveAmpSent[i] = 255;
+}
+
+void sendLiveAmpOsc(uint8_t oscIndex, bool force = false) {
+  if (oscIndex >= 3) return;
+  uint8_t level = modulatedAmpLevel(currentPreset.osc[oscIndex].level);
+  if (!force && lastLiveAmpSent[oscIndex] == level) return;
+
+  synth.setVolume(OSC_CH[oscIndex], level);
+  lastLiveAmpSent[oscIndex] = level;
+}
+
+void sendLiveAmpGm(bool force = false) {
+  uint8_t level = modulatedAmpLevel(currentGmLayer.level);
+  if (!force && lastLiveAmpSent[3] == level) return;
+
+  synth.setVolume(GM_CH, level);
+  lastLiveAmpSent[3] = level;
+}
+
+void sendLiveAmpAll(bool force = false) {
+  for (uint8_t i = 0; i < 3; ++i) {
+    sendLiveAmpOsc(i, force);
+  }
+  sendLiveAmpGm(force);
 }
 
 uint8_t modulatedCutoffForOsc(uint8_t oscIndex) {

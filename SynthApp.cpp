@@ -1821,7 +1821,7 @@ void applyOscStatic(uint8_t oscIndex) {
   setPitchBendRange(ch, softwareMonoVoiceActive() ? SOFTWARE_GLIDE_BEND_RANGE : 2);
   synth.setTuning(ch, fineTuneValueFromCents(o.detune), 64);
   synth.setPan(ch, o.pan);
-  synth.setVolume(ch, scaledOscLevel(o.level));
+  sendLiveAmpOsc(oscIndex, true);
 
   // Hidden legacy chorus retained to preserve old patch character.
   sendCC(ch, 81, currentPreset.legacyChorusProgram);
@@ -1836,7 +1836,7 @@ void applyGmLayerStatic() {
   sendCC(GM_CH, 32, 0);
   sendProgram(GM_CH, currentGmLayer.program);
   delay(2);
-  synth.setVolume(GM_CH, currentGmLayer.level);
+  sendLiveAmpGm(true);
   synth.setPan(GM_CH, currentGmLayer.pan);
   setPitchBendRange(GM_CH, softwareMonoVoiceActive() ? SOFTWARE_GLIDE_BEND_RANGE : 2);
   sendCC(GM_CH, 127, 0); // DinMeter note manager owns mono behavior
@@ -1974,6 +1974,7 @@ void applyCurrentPresetToSynth(bool rebuildNotes = true) {
   silenceSynthOnly();
   resetModulationRuntime();
   invalidateLiveCutoffCache();
+  invalidateLiveAmpCache();
 
   applyMasterVolume();
 
@@ -2916,7 +2917,7 @@ void applyOscPageKnob(uint8_t knob, uint8_t v) {
     case 1:
       if (o.level != v) {
         o.level = v;
-        synth.setVolume(OSC_CH[oi], o.level);
+        sendLiveAmpOsc(oi, true);
         changed = true;
       }
       break;
@@ -3002,7 +3003,7 @@ void applyGmPageKnob(uint8_t knob, uint8_t v) {
         if ((oldLevel == 0) != (v == 0)) {
           reapplyAndRebuild();
         } else {
-          synth.setVolume(GM_CH, currentGmLayer.level);
+          sendLiveAmpGm(true);
         }
       }
       break;

@@ -1264,8 +1264,24 @@ bool softwarePortamentoActive() {
   return currentPreset.mono && currentPreset.glide;
 }
 
+int modularPitchBendOffset() {
+  int modulation = constrain(modulationForDestination(MODDST_PITCH), -127, 127);
+  if (modulation == 0) return 0;
+
+  // Full route depth = +/-2 semitones. During software glide the channel
+  // bend range is +/-24 semitones, so convert the same musical depth into
+  // the smaller 14-bit offset required by that wider bend range.
+  uint8_t rangeSemitones =
+      softwareMonoVoiceActive() ? SOFTWARE_GLIDE_BEND_RANGE : 2;
+
+  long numerator = (long)modulation * 8192L * 2L;
+  long denominator = 127L * max((int)rangeSemitones, 1);
+  return (int)(numerator / denominator);
+}
+
 void sendSoftwareBendAll(int bend) {
-  bend = constrain(bend, 0, 16383);
+  bend = constrain(bend + modularPitchBendOffset(), 0, 16383);
+
   for (uint8_t i = 0; i < 3; ++i) {
     if (currentPreset.osc[i].level > 0) {
       sendPitchBend14(OSC_CH[i], bend);
@@ -1274,10 +1290,18 @@ void sendSoftwareBendAll(int bend) {
   if (currentGmLayer.level > 0) sendPitchBend14(GM_CH, bend);
 }
 
+void sendCurrentPitchModulation() {
+  int baseBend = softwareMonoVoiceActive()
+               ? monoBendCurrent
+               : performanceBendCurrent;
+  sendSoftwareBendAll(baseBend);
+}
+
 void resetSoftwareBend(bool sendNow = true) {
   monoBendCurrent = PITCH_BEND_CENTER;
   monoBendStart = PITCH_BEND_CENTER;
   monoBendTarget = PITCH_BEND_CENTER;
+  performanceBendCurrent = PITCH_BEND_CENTER;
   monoGlideStartedAt = millis();
   monoGlideDurationMs = 0;
   monoGlideLastSendAt = 0;
@@ -2357,17 +2381,15 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
   }
 
   if (cin == 0xE) {
-    // Software portamento owns Pitch Bend while a legato phrase is active.
-    // Combining wheel bend with glide can be added later; for now avoid the
-    // two controllers fighting over the same 14-bit bend value.
+    // Software portamento owns the base Pitch Bend while a legato phrase is
+    // active. Outside that mode, preserve the external wheel and add modular
+    // pitch movement on top of it.
     if (softwareMonoVoiceActive()) return;
 
-    for (uint8_t i = 0; i < 3; ++i) {
-      sendPitchBendRaw(OSC_CH[i], packet[2], packet[3]);
-    }
-    if (currentGmLayer.level > 0) {
-      sendPitchBendRaw(GM_CH, packet[2], packet[3]);
-    }
+    performanceBendCurrent =
+        (int16_t)(((uint16_t)(packet[3] & 0x7F) << 7) |
+                  (uint16_t)(packet[2] & 0x7F));
+    sendSoftwareBendAll(performanceBendCurrent);
     return;
   }
 

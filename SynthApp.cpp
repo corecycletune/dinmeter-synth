@@ -952,6 +952,9 @@ void sendLiveCutoffAll(bool force = false) {
   }
 }
 
+// Defined below after Pitch Bend helpers.
+void refreshModulationOutputs(bool force);
+
 uint32_t envelopeTimeMs(uint8_t value) {
   // Cubic mapping gives usable short times while still reaching long sweeps:
   // 0=0ms, 32~128ms, 64~1024ms, 127~8000ms.
@@ -998,8 +1001,8 @@ void triggerModEnvelopes(bool phraseStart) {
     }
   }
 
-  // For zero-attack envelopes, push the peak before the NoteOn reaches SAM.
-  sendLiveCutoffAll();
+  // For zero-attack envelopes, push all destinations before NoteOn.
+  refreshModulationOutputs(false);
 }
 
 void releaseModEnvelopes() {
@@ -1295,6 +1298,12 @@ void sendCurrentPitchModulation() {
                ? monoBendCurrent
                : performanceBendCurrent;
   sendSoftwareBendAll(baseBend);
+}
+
+void refreshModulationOutputs(bool force) {
+  sendLiveCutoffAll(force);
+  sendCurrentPitchModulation();
+  sendLiveAmpAll(force);
 }
 
 void resetSoftwareBend(bool sendNow = true) {
@@ -2575,7 +2584,12 @@ uint8_t currentParamAs127(uint8_t knob) {
         uint8_t src = (route.source <= MODSRC_LFO3) ? route.source : (uint8_t)MODSRC_NONE;
         return (uint8_t)(((uint16_t)src * 127) / MODSRC_LFO3);
       }
-      case 1: return route.destination == MODDST_CUTOFF ? 127 : 0;
+      case 1: {
+        uint8_t dst = route.destination <= MODDST_AMP
+                    ? route.destination
+                    : (uint8_t)MODDST_NONE;
+        return (uint8_t)(((uint16_t)dst * 127) / MODDST_AMP);
+      }
       case 2: return mapSignedTo127(route.amount, -127, 127);
       case 3: return route.enabled ? 127 : 0;
       default: return 0;
@@ -3091,7 +3105,10 @@ void applyEnvPageKnob(uint8_t knob, uint8_t v) {
       return;
   }
 
-  if (changed) markModified();
+  if (changed) {
+    markModified();
+    refreshModulationOutputs(false);
+  }
 }
 
 void applyLfoPageKnob(uint8_t knob, uint8_t v) {
@@ -3126,7 +3143,7 @@ void applyLfoPageKnob(uint8_t knob, uint8_t v) {
   if (changed) {
     markModified();
     resetLfoRuntime();
-    sendLiveCutoffAll();
+    refreshModulationOutputs(false);
   }
 }
 
@@ -3144,7 +3161,8 @@ void applyRoutePageKnob(uint8_t knob, uint8_t v) {
     }
 
     case 1: {
-      uint8_t destination = v >= 64 ? MODDST_CUTOFF : MODDST_NONE;
+      uint8_t destination = (uint8_t)(((uint16_t)v * 4) / 128);
+      if (destination > MODDST_AMP) destination = MODDST_AMP;
       changed = route.destination != destination;
       route.destination = destination;
       break;
@@ -3169,7 +3187,7 @@ void applyRoutePageKnob(uint8_t knob, uint8_t v) {
   }
 
   if (changed) {
-    sendLiveCutoffAll();
+    refreshModulationOutputs(true);
     markModified();
   }
 }
@@ -5187,6 +5205,15 @@ const char* routeSourceLabel(uint8_t source) {
   }
 }
 
+const char* routeDestinationLabel(uint8_t destination) {
+  switch (destination) {
+    case MODDST_CUTOFF: return "CUT";
+    case MODDST_PITCH: return "PIT";
+    case MODDST_AMP: return "AMP";
+    default: return "---";
+  }
+}
+
 const char* lfoWaveLabel(uint8_t waveform) {
   switch (waveform) {
     case LFO_WAVE_SINE: return "SIN";
@@ -5246,7 +5273,7 @@ void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
     const ModRoute& route = currentPreset.routes[selectedRoute];
     switch (knob) {
       case 0: snprintf(out, n, "%s", routeSourceLabel(route.source)); return;
-      case 1: snprintf(out, n, "%s", route.destination == MODDST_CUTOFF ? "CUT" : "---"); return;
+      case 1: snprintf(out, n, "%s", routeDestinationLabel(route.destination)); return;
       case 2: snprintf(out, n, "%+d", route.amount); return;
       case 3: snprintf(out, n, "%s", route.enabled ? "ON" : "--"); return;
       default: snprintf(out, n, "-"); return;

@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.8
+  Version: v1.10.9
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -36,7 +36,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.8";
+  "DINMETER_FW_VERSION=v1.10.9";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -1459,7 +1459,7 @@ void initModularDefaults(Preset& p) {
 }
 
 void migrateStoredPresetV1910(const StoredPresetV1910& oldPreset, Preset& out) {
-  // Preset keeps the entire v1.10.8 object as a byte-compatible prefix.
+  // Preset keeps the entire v1.10.9 object as a byte-compatible prefix.
   memcpy(&out, &oldPreset, sizeof(oldPreset));
   initModularDefaults(out);
 }
@@ -4923,7 +4923,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.8");
+  M5.Display.print("FW          : v1.10.9");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -4977,7 +4977,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.8  LATEST ");
+    M5.Display.print("FW v1.10.9  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -5635,7 +5635,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.8");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.9");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -5689,7 +5689,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.8
+  Version: v1.10.9
   END
   ======================================================================
 */

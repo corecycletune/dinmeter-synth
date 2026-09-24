@@ -1177,14 +1177,17 @@ void updateLfoRuntime(uint8_t i, uint32_t nowMs) {
   rt.value = lfoWaveValue(lfo.waveform, rt.phase, rt.randomValue) * gain;
 }
 
-bool hasDynamicCutoffRoute() {
+bool hasDynamicRouteForDestination(uint8_t destination) {
   for (uint8_t i = 0; i < MOD_ROUTE_COUNT; ++i) {
     const ModRoute& route = currentPreset.routes[i];
-    if (!route.enabled || route.destination != MODDST_CUTOFF) continue;
+    if (!route.enabled || route.destination != destination) continue;
     if (route.source >= MODSRC_ENV1 && route.source <= MODSRC_LFO3) return true;
   }
   return false;
 }
+
+// Implemented below, after Pitch Bend helpers are defined.
+void sendCurrentPitchModulation();
 
 void updateModulationEngine() {
   uint32_t nowMs = millis();
@@ -1196,14 +1199,28 @@ void updateModulationEngine() {
     updateLfoRuntime(i, nowMs);
   }
 
-  if (!hasDynamicCutoffRoute()) return;
+  const bool cutoffActive = hasDynamicRouteForDestination(MODDST_CUTOFF);
+  const bool pitchActive  = hasDynamicRouteForDestination(MODDST_PITCH);
+  const bool ampActive    = hasDynamicRouteForDestination(MODDST_AMP);
+
+  if (!cutoffActive && !pitchActive && !ampActive) return;
   if (nowMs - lastModOutputAt < MOD_OUTPUT_INTERVAL_MS) return;
   lastModOutputAt = nowMs;
 
-  // Only active oscillator layers need continuous updates. Manual/preset
-  // changes still use sendLiveCutoffAll() and configure all three layers.
-  for (uint8_t i = 0; i < 3; ++i) {
-    if (currentPreset.osc[i].level > 0) sendLiveCutoff(i);
+  if (cutoffActive) {
+    // Only active oscillator layers need continuous GS filter updates.
+    for (uint8_t i = 0; i < 3; ++i) {
+      if (currentPreset.osc[i].level > 0) sendLiveCutoff(i);
+    }
+  }
+
+  if (pitchActive) sendCurrentPitchModulation();
+
+  if (ampActive) {
+    for (uint8_t i = 0; i < 3; ++i) {
+      if (currentPreset.osc[i].level > 0) sendLiveAmpOsc(i);
+    }
+    if (currentGmLayer.level > 0) sendLiveAmpGm();
   }
 }
 

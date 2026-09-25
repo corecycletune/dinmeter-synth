@@ -1916,6 +1916,11 @@ void applyGmLayerStatic() {
   sendCC(GM_CH, 67, currentPreset.soft ? 127 : 0);
 }
 
+void clearOutputNoteTracking() {
+  memset(activeOscOutputValid, 0, sizeof(activeOscOutputValid));
+  memset(activeGmOutputValid, 0, sizeof(activeGmOutputValid));
+}
+
 void silenceSynthOnly() {
   for (uint8_t i = 0; i < 3; ++i) {
     sendCC(OSC_CH[i], 64, 0);
@@ -1925,6 +1930,10 @@ void silenceSynthOnly() {
   sendCC(GM_CH, 64, 0);
   sendCC(GM_CH, 123, 0);
   sendCC(GM_CH, 120, 0);
+
+  // All Notes Off / All Sound Off invalidates every tracked SAM voice.
+  clearOutputNoteTracking();
+
   currentMonoNote = -1;
   monoAnchorNote = -1;
   monoTargetNote = -1;
@@ -1978,24 +1987,95 @@ int16_t lastHeldNote() {
 }
 
 void sendOscNote(uint8_t oscIndex, uint8_t messageType, uint8_t inputNote, uint8_t velocity) {
-  const OscState& o = currentPreset.osc[oscIndex];
-  if (o.level == 0) return;
+  if (oscIndex >= 3 || inputNote > 127) return;
 
-  int note = (int)inputNote + o.transpose;
-  if (note < 0 || note > 127) return;
+  const uint8_t type = messageType & 0xF0;
+  const bool noteOn = (type == 0x90 && velocity > 0);
+  const bool noteOff = (type == 0x80 || (type == 0x90 && velocity == 0));
 
-  sendMidi3(messageType | (OSC_CH[oscIndex] & 0x0F),
-            note & 0x7F,
-            velocity & 0x7F);
+  if (noteOn) {
+    if (!oscEnabled(oscIndex)) return;
+
+    const OscState& o = currentPreset.osc[oscIndex];
+    int note = (int)inputNote + o.transpose;
+    if (note < 0 || note > 127) return;
+
+    // Defensive de-duplication: if this input note already owns a SAM note,
+    // release the previous one before replacing it.
+    if (activeOscOutputValid[oscIndex][inputNote]) {
+      sendMidi3(0x80 | (OSC_CH[oscIndex] & 0x0F),
+                activeOscOutputNote[oscIndex][inputNote],
+                0);
+    }
+
+    sendMidi3(0x90 | (OSC_CH[oscIndex] & 0x0F),
+              note & 0x7F,
+              velocity & 0x7F);
+    activeOscOutputNote[oscIndex][inputNote] = note & 0x7F;
+    activeOscOutputValid[oscIndex][inputNote] = true;
+    return;
+  }
+
+  if (noteOff) {
+    // Crucial: NoteOff is based on the exact note that was sent at NoteOn,
+    // not today's LVL/ENA/transpose. Sound design edits while holding a key
+    // therefore cannot strand a voice.
+    if (activeOscOutputValid[oscIndex][inputNote]) {
+      sendMidi3(0x80 | (OSC_CH[oscIndex] & 0x0F),
+                activeOscOutputNote[oscIndex][inputNote],
+                velocity & 0x7F);
+      activeOscOutputValid[oscIndex][inputNote] = false;
+      return;
+    }
+
+    // Harmless fallback for any voice created before tracking was established.
+    const OscState& o = currentPreset.osc[oscIndex];
+    int note = (int)inputNote + o.transpose;
+    if (note >= 0 && note <= 127) {
+      sendMidi3(0x80 | (OSC_CH[oscIndex] & 0x0F),
+                note & 0x7F,
+                velocity & 0x7F);
+    }
+  }
 }
 
 void sendGmLayerNote(uint8_t messageType, uint8_t inputNote, uint8_t velocity) {
-  if (currentGmLayer.level == 0) return;
+  if (inputNote > 127) return;
 
-  int note = (int)inputNote + currentGmLayer.transpose;
-  if (note < 0 || note > 127) return;
+  const uint8_t type = messageType & 0xF0;
+  const bool noteOn = (type == 0x90 && velocity > 0);
+  const bool noteOff = (type == 0x80 || (type == 0x90 && velocity == 0));
 
-  sendMidi3(messageType | (GM_CH & 0x0F), note & 0x7F, velocity & 0x7F);
+  if (noteOn) {
+    if (currentGmLayer.level == 0) return;
+
+    int note = (int)inputNote + currentGmLayer.transpose;
+    if (note < 0 || note > 127) return;
+
+    if (activeGmOutputValid[inputNote]) {
+      sendMidi3(0x80 | (GM_CH & 0x0F), activeGmOutputNote[inputNote], 0);
+    }
+
+    sendMidi3(0x90 | (GM_CH & 0x0F), note & 0x7F, velocity & 0x7F);
+    activeGmOutputNote[inputNote] = note & 0x7F;
+    activeGmOutputValid[inputNote] = true;
+    return;
+  }
+
+  if (noteOff) {
+    if (activeGmOutputValid[inputNote]) {
+      sendMidi3(0x80 | (GM_CH & 0x0F),
+                activeGmOutputNote[inputNote],
+                velocity & 0x7F);
+      activeGmOutputValid[inputNote] = false;
+      return;
+    }
+
+    int note = (int)inputNote + currentGmLayer.transpose;
+    if (note >= 0 && note <= 127) {
+      sendMidi3(0x80 | (GM_CH & 0x0F), note & 0x7F, velocity & 0x7F);
+    }
+  }
 }
 
 void sendLayeredNote(uint8_t messageType, uint8_t inputNote, uint8_t velocity) {

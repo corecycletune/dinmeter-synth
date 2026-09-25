@@ -1090,3 +1090,12 @@ v1.10.9 ROUTE destinations + OSC enable/note safety
 - Duplicate NoteOn without a prior NoteOff and incoming CC120/CC123 trigger a
   quiet state resync as extra protection against controller/USB note loss.
 - VOICE ENV CONFIG tab abbreviation changes from VN to VE.
+
+
+v1.10.10 PERFORMANCE encoder PANIC
+----------------------------------
+- In PERFORMANCE mode, a short press of the Din Meter encoder now triggers
+  PANIC immediately.
+- Encoder long press still opens/closes the SYSTEM MENU.
+- CONFIG-mode short press behavior is unchanged (OSC/ENV/LFO/ROUTE selection,
+  VOICE ENV neutral reset, etc.).

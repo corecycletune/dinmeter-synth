@@ -923,7 +923,9 @@ void invalidateLiveAmpCache() {
 
 void sendLiveAmpOsc(uint8_t oscIndex, bool force = false) {
   if (oscIndex >= 3) return;
-  uint8_t level = modulatedAmpLevel(currentPreset.osc[oscIndex].level);
+  uint8_t level = oscEnabled(oscIndex)
+                ? modulatedAmpLevel(currentPreset.osc[oscIndex].level)
+                : 0;
   if (!force && lastLiveAmpSent[oscIndex] == level) return;
 
   synth.setVolume(OSC_CH[oscIndex], level);
@@ -1311,7 +1313,7 @@ void sendSoftwareBendAll(int bend) {
   bend = constrain(bend + modularPitchBendOffset(), 0, 16383);
 
   for (uint8_t i = 0; i < 3; ++i) {
-    if (currentPreset.osc[i].level > 0) {
+    if (oscEnabled(i)) {
       sendPitchBend14(OSC_CH[i], bend);
     }
   }
@@ -2597,7 +2599,7 @@ uint8_t currentParamAs127(uint8_t knob) {
       case 4: return mapSignedTo127(o.cutoffTrim, -63, 63);
       case 5: return mapSignedTo127(o.resonanceTrim, -63, 63);
       case 6: return o.pan;
-      case 7: return 0;
+      case 7: return oscEnabled(selectedOsc) ? 127 : 0;
     }
   }
 
@@ -2677,7 +2679,7 @@ bool knobIsReserved(uint8_t knob) {
 
   if (page == PAGE_FILTER_ENV) return knob >= 5;
   if (page == PAGE_VOICE_ENV) return knob >= 3;
-  if (page == PAGE_OSC) return knob == 7;
+  if (page == PAGE_OSC) return false;
   if (page == PAGE_GM) return knob >= 4;
   if (page == PAGE_ENV) return knob >= 6;
   if (page == PAGE_LFO) return knob >= 6;
@@ -3046,8 +3048,19 @@ void applyOscPageKnob(uint8_t knob, uint8_t v) {
       }
       break;
 
-    case 7:
-      return;
+    case 7: {
+      bool enabled = v >= 64;
+      if (oscEnabled(oi) != enabled) {
+        setOscEnabled(oi, enabled);
+        changed = true;
+
+        // Switching layer participation while notes are held is deliberately
+        // handled as a full stop/rebuild. This prevents an old NoteOn from
+        // surviving on a layer that has just been disabled.
+        reapplyAndRebuild();
+      }
+      break;
+    }
   }
 
   if (changed) markModified();

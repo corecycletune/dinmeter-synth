@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.8
+  Version: v1.10.9
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -36,7 +36,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.8";
+  "DINMETER_FW_VERSION=v1.10.9";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -309,10 +309,28 @@ struct __attribute__((packed)) GmLayerState {
   uint8_t pan;
 };
 
+struct __attribute__((packed)) OscLayerState {
+  uint8_t version;
+  uint8_t enabledMask; // bits 0..2 = OSC1..3
+};
+
 static constexpr uint8_t GM_LAYER_VERSION = 1;
+static constexpr uint8_t OSC_LAYER_VERSION = 1;
 
 Preset currentPreset;
 GmLayerState currentGmLayer = {GM_LAYER_VERSION, 0, 0, 0, 64};
+OscLayerState currentOscLayer = {OSC_LAYER_VERSION, 0x07};
+
+bool oscEnabled(uint8_t osc) {
+  if (osc >= 3) return false;
+  return (currentOscLayer.enabledMask & (1u << osc)) != 0;
+}
+
+void setOscEnabled(uint8_t osc, bool enabled) {
+  if (osc >= 3) return;
+  if (enabled) currentOscLayer.enabledMask |= (1u << osc);
+  else         currentOscLayer.enabledMask &= ~(1u << osc);
+}
 
 uint8_t browseBank  = 0;  // encoder selects this bank
 uint8_t loadedBank  = 0;  // actually sounding bank
@@ -436,7 +454,7 @@ static const char* PAGE_NAMES[PAGE_COUNT] = {
 };
 
 static const char* PAGE_TAB[PAGE_COUNT] = {
-  "PF", "TN", "VN", "OS", "GM", "EN", "LF", "RT", "MD"
+  "PF", "TN", "VE", "OS", "GM", "EN", "LF", "RT", "MD"
 };
 
 static const char* PERF_LABELS[8] = {
@@ -452,7 +470,7 @@ static const char* VOICE_ENV_LABELS[8] = {
 };
 
 static const char* OSC_LABELS[8] = {
-  "WAV", "LVL", "OCT", "DET", "CUT", "RES", "PAN", "---"
+  "WAV", "LVL", "OCT", "DET", "CUT", "RES", "PAN", "ENA"
 };
 
 static const char* GM_LABELS[8] = {
@@ -489,6 +507,13 @@ uint8_t noteOrder[128] = {};
 uint8_t heldCount = 0;
 int16_t currentMonoNote = -1;
 
+// Exact SAM note tracking. NoteOff must target the note that was actually sent,
+// even if transpose/level/enable changes while a key is still held.
+uint8_t activeOscOutputNote[3][128] = {};
+bool activeOscOutputValid[3][128] = {};
+uint8_t activeGmOutputNote[128] = {};
+bool activeGmOutputValid[128] = {};
+
 // ======================================================================
 // Modular modulation runtime
 // ENV is calculated inside the ESP32. Only the final destination value is
@@ -522,7 +547,7 @@ struct LfoRuntime {
 EnvRuntime envRuntime[ENV_COUNT] = {};
 LfoRuntime lfoRuntime[LFO_COUNT] = {};
 uint32_t lastModOutputAt = 0;
-static constexpr uint32_t MOD_OUTPUT_INTERVAL_MS = 24; // ~42 Hz max GS updates
+static constexpr uint32_t MOD_OUTPUT_INTERVAL_MS = 32; // ~31 Hz, leaves MIDI headroom
 
 void resetLfoRuntime() {
   uint32_t nowMs = millis();
@@ -561,6 +586,7 @@ int16_t monoTargetNote = -1;       // last-note-priority destination
 int16_t monoBendCurrent = 8192;    // 14-bit MIDI Pitch Bend
 int16_t monoBendStart = 8192;
 int16_t monoBendTarget = 8192;
+int16_t performanceBendCurrent = 8192; // external pitch wheel when glide is inactive
 uint32_t monoGlideStartedAt = 0;
 uint32_t monoGlideDurationMs = 0;
 uint32_t monoGlideLastSendAt = 0;
@@ -851,6 +877,76 @@ int modulationForDestination(uint8_t destination) {
   return total;
 }
 
+bool modulationSourceIsEnvelope(uint8_t source) {
+  return source >= MODSRC_ENV1 && source <= MODSRC_ENV3;
+}
+
+uint8_t modulatedAmpLevel(uint8_t baseLevel) {
+  int level = baseLevel;
+
+  for (uint8_t i = 0; i < MOD_ROUTE_COUNT; ++i) {
+    const ModRoute& route = currentPreset.routes[i];
+    if (!route.enabled || route.destination != MODDST_AMP) continue;
+    if (route.source == MODSRC_NONE) continue;
+
+    int source = modulationSourceValue(route.source);
+    int amount = route.amount;
+    int factor = 127; // unity
+
+    if (modulationSourceIsEnvelope(route.source)) {
+      // Positive ENV amount behaves like a VCA envelope:
+      // +127 => ENV 0..127 maps gain 0..1.
+      // Negative amount produces the inverse contour.
+      if (amount >= 0) {
+        factor = 127 - amount + (source * amount) / 127;
+      } else {
+        int depth = -amount;
+        factor = 127 - (source * depth) / 127;
+      }
+    } else {
+      // Bipolar sources such as LFO act as tremolo around unity.
+      factor = 127 + (source * amount) / 127;
+    }
+
+    factor = constrain(factor, 0, 254);
+    level = constrain((level * factor + 63) / 127, 0, 127);
+  }
+
+  return (uint8_t)level;
+}
+
+uint8_t lastLiveAmpSent[4] = {255, 255, 255, 255};
+
+void invalidateLiveAmpCache() {
+  for (uint8_t i = 0; i < 4; ++i) lastLiveAmpSent[i] = 255;
+}
+
+void sendLiveAmpOsc(uint8_t oscIndex, bool force = false) {
+  if (oscIndex >= 3) return;
+  uint8_t level = oscEnabled(oscIndex)
+                ? modulatedAmpLevel(currentPreset.osc[oscIndex].level)
+                : 0;
+  if (!force && lastLiveAmpSent[oscIndex] == level) return;
+
+  synth.setVolume(OSC_CH[oscIndex], level);
+  lastLiveAmpSent[oscIndex] = level;
+}
+
+void sendLiveAmpGm(bool force = false) {
+  uint8_t level = modulatedAmpLevel(currentGmLayer.level);
+  if (!force && lastLiveAmpSent[3] == level) return;
+
+  synth.setVolume(GM_CH, level);
+  lastLiveAmpSent[3] = level;
+}
+
+void sendLiveAmpAll(bool force = false) {
+  for (uint8_t i = 0; i < 3; ++i) {
+    sendLiveAmpOsc(i, force);
+  }
+  sendLiveAmpGm(force);
+}
+
 uint8_t modulatedCutoffForOsc(uint8_t oscIndex) {
   int value = (int)oscEffectiveCutoff(oscIndex);
   value += modulationForDestination(MODDST_CUTOFF);
@@ -882,6 +978,9 @@ void sendLiveCutoffAll(bool force = false) {
     sendLiveCutoff(i, force);
   }
 }
+
+// Defined below after Pitch Bend helpers.
+void refreshModulationOutputs(bool force);
 
 uint32_t envelopeTimeMs(uint8_t value) {
   // Cubic mapping gives usable short times while still reaching long sweeps:
@@ -929,8 +1028,8 @@ void triggerModEnvelopes(bool phraseStart) {
     }
   }
 
-  // For zero-attack envelopes, push the peak before the NoteOn reaches SAM.
-  sendLiveCutoffAll();
+  // For zero-attack envelopes, push all destinations before NoteOn.
+  refreshModulationOutputs(false);
 }
 
 void releaseModEnvelopes() {
@@ -1108,14 +1207,17 @@ void updateLfoRuntime(uint8_t i, uint32_t nowMs) {
   rt.value = lfoWaveValue(lfo.waveform, rt.phase, rt.randomValue) * gain;
 }
 
-bool hasDynamicCutoffRoute() {
+bool hasDynamicRouteForDestination(uint8_t destination) {
   for (uint8_t i = 0; i < MOD_ROUTE_COUNT; ++i) {
     const ModRoute& route = currentPreset.routes[i];
-    if (!route.enabled || route.destination != MODDST_CUTOFF) continue;
+    if (!route.enabled || route.destination != destination) continue;
     if (route.source >= MODSRC_ENV1 && route.source <= MODSRC_LFO3) return true;
   }
   return false;
 }
+
+// Implemented below, after Pitch Bend helpers are defined.
+void sendCurrentPitchModulation();
 
 void updateModulationEngine() {
   uint32_t nowMs = millis();
@@ -1127,14 +1229,28 @@ void updateModulationEngine() {
     updateLfoRuntime(i, nowMs);
   }
 
-  if (!hasDynamicCutoffRoute()) return;
+  const bool cutoffActive = hasDynamicRouteForDestination(MODDST_CUTOFF);
+  const bool pitchActive  = hasDynamicRouteForDestination(MODDST_PITCH);
+  const bool ampActive    = hasDynamicRouteForDestination(MODDST_AMP);
+
+  if (!cutoffActive && !pitchActive && !ampActive) return;
   if (nowMs - lastModOutputAt < MOD_OUTPUT_INTERVAL_MS) return;
   lastModOutputAt = nowMs;
 
-  // Only active oscillator layers need continuous updates. Manual/preset
-  // changes still use sendLiveCutoffAll() and configure all three layers.
-  for (uint8_t i = 0; i < 3; ++i) {
-    if (currentPreset.osc[i].level > 0) sendLiveCutoff(i);
+  if (cutoffActive) {
+    // Only active oscillator layers need continuous GS filter updates.
+    for (uint8_t i = 0; i < 3; ++i) {
+      if (oscEnabled(i) && currentPreset.osc[i].level > 0) sendLiveCutoff(i);
+    }
+  }
+
+  if (pitchActive) sendCurrentPitchModulation();
+
+  if (ampActive) {
+    for (uint8_t i = 0; i < 3; ++i) {
+      if (oscEnabled(i) && currentPreset.osc[i].level > 0) sendLiveAmpOsc(i);
+    }
+    if (currentGmLayer.level > 0) sendLiveAmpGm();
   }
 }
 
@@ -1178,20 +1294,50 @@ bool softwarePortamentoActive() {
   return currentPreset.mono && currentPreset.glide;
 }
 
+int modularPitchBendOffset() {
+  int modulation = constrain(modulationForDestination(MODDST_PITCH), -127, 127);
+  if (modulation == 0) return 0;
+
+  // Full route depth = +/-2 semitones. During software glide the channel
+  // bend range is +/-24 semitones, so convert the same musical depth into
+  // the smaller 14-bit offset required by that wider bend range.
+  uint8_t rangeSemitones =
+      softwareMonoVoiceActive() ? SOFTWARE_GLIDE_BEND_RANGE : 2;
+
+  long numerator = (long)modulation * 8192L * 2L;
+  long denominator = 127L * max((int)rangeSemitones, 1);
+  return (int)(numerator / denominator);
+}
+
 void sendSoftwareBendAll(int bend) {
-  bend = constrain(bend, 0, 16383);
+  bend = constrain(bend + modularPitchBendOffset(), 0, 16383);
+
   for (uint8_t i = 0; i < 3; ++i) {
-    if (currentPreset.osc[i].level > 0) {
+    if (oscEnabled(i)) {
       sendPitchBend14(OSC_CH[i], bend);
     }
   }
   if (currentGmLayer.level > 0) sendPitchBend14(GM_CH, bend);
 }
 
+void sendCurrentPitchModulation() {
+  int baseBend = softwareMonoVoiceActive()
+               ? monoBendCurrent
+               : performanceBendCurrent;
+  sendSoftwareBendAll(baseBend);
+}
+
+void refreshModulationOutputs(bool force) {
+  sendLiveCutoffAll(force);
+  sendCurrentPitchModulation();
+  sendLiveAmpAll(force);
+}
+
 void resetSoftwareBend(bool sendNow = true) {
   monoBendCurrent = PITCH_BEND_CENTER;
   monoBendStart = PITCH_BEND_CENTER;
   monoBendTarget = PITCH_BEND_CENTER;
+  performanceBendCurrent = PITCH_BEND_CENTER;
   monoGlideStartedAt = millis();
   monoGlideDurationMs = 0;
   monoGlideLastSendAt = 0;
@@ -1302,10 +1448,6 @@ uint8_t logicalToPhysicalButton(uint8_t logical) {
   return 7 - logical;
 }
 
-bool oscEnabled(uint8_t osc) {
-  return currentPreset.osc[osc].level > 0;
-}
-
 uint8_t scaledOscLevel(uint8_t v) {
   return v;
 }
@@ -1340,7 +1482,7 @@ void initModularDefaults(Preset& p) {
 }
 
 void migrateStoredPresetV1910(const StoredPresetV1910& oldPreset, Preset& out) {
-  // Preset keeps the entire v1.10.8 object as a byte-compatible prefix.
+  // Preset keeps the entire v1.10.9 object as a byte-compatible prefix.
   memcpy(&out, &oldPreset, sizeof(oldPreset));
   initModularDefaults(out);
 }
@@ -1486,6 +1628,43 @@ void gmLayerKey(uint8_t index, char* out, size_t outSize) {
   snprintf(out, outSize, "g%02u", index);
 }
 
+void oscLayerKey(uint8_t index, char* out, size_t outSize) {
+  snprintf(out, outSize, "o%02u", index);
+}
+
+OscLayerState defaultOscLayer(const Preset& preset) {
+  OscLayerState state = {OSC_LAYER_VERSION, 0};
+
+  // Preserve the audible behavior of all existing presets on first load:
+  // layers that already had non-zero level start enabled; silent layers start
+  // disabled and can now be explicitly enabled from the OS page.
+  for (uint8_t i = 0; i < 3; ++i) {
+    if (preset.osc[i].level > 0) state.enabledMask |= (1u << i);
+  }
+  return state;
+}
+
+void loadOscLayerData(uint8_t index, const Preset& preset, OscLayerState& out) {
+  out = defaultOscLayer(preset);
+
+  char key[8];
+  oscLayerKey(index, key, sizeof(key));
+  if (prefs.getBytesLength(key) != sizeof(OscLayerState)) return;
+
+  OscLayerState stored{};
+  prefs.getBytes(key, &stored, sizeof(stored));
+  if (stored.version != OSC_LAYER_VERSION) return;
+
+  stored.enabledMask &= 0x07;
+  out = stored;
+}
+
+void saveOscLayerData(uint8_t index, const OscLayerState& state) {
+  char key[8];
+  oscLayerKey(index, key, sizeof(key));
+  prefs.putBytes(key, &state, sizeof(state));
+}
+
 GmLayerState defaultGmLayer(uint8_t index) {
   GmLayerState state = {GM_LAYER_VERSION, 0, 0, 0, 64};
   const uint8_t gmStart = GM_BANK_INDEX * PRESETS_PER_BANK;
@@ -1565,6 +1744,7 @@ void saveCurrentPreset() {
   presetKey(currentPresetIndex(), key, sizeof(key));
   prefs.putBytes(key, &currentPreset, sizeof(Preset));
   saveGmLayerData(currentPresetIndex(), currentGmLayer);
+  saveOscLayerData(currentPresetIndex(), currentOscLayer);
   modified = false;
   screenDirty = true;
 }
@@ -1711,7 +1891,7 @@ void applyOscStatic(uint8_t oscIndex) {
   setPitchBendRange(ch, softwareMonoVoiceActive() ? SOFTWARE_GLIDE_BEND_RANGE : 2);
   synth.setTuning(ch, fineTuneValueFromCents(o.detune), 64);
   synth.setPan(ch, o.pan);
-  synth.setVolume(ch, scaledOscLevel(o.level));
+  sendLiveAmpOsc(oscIndex, true);
 
   // Hidden legacy chorus retained to preserve old patch character.
   sendCC(ch, 81, currentPreset.legacyChorusProgram);
@@ -1726,7 +1906,7 @@ void applyGmLayerStatic() {
   sendCC(GM_CH, 32, 0);
   sendProgram(GM_CH, currentGmLayer.program);
   delay(2);
-  synth.setVolume(GM_CH, currentGmLayer.level);
+  sendLiveAmpGm(true);
   synth.setPan(GM_CH, currentGmLayer.pan);
   setPitchBendRange(GM_CH, softwareMonoVoiceActive() ? SOFTWARE_GLIDE_BEND_RANGE : 2);
   sendCC(GM_CH, 127, 0); // DinMeter note manager owns mono behavior
@@ -1734,6 +1914,11 @@ void applyGmLayerStatic() {
   sendPitchBendRaw(GM_CH, 0, 64);
   sendCC(GM_CH, 64, effectiveSustain() ? 127 : 0);
   sendCC(GM_CH, 67, currentPreset.soft ? 127 : 0);
+}
+
+void clearOutputNoteTracking() {
+  memset(activeOscOutputValid, 0, sizeof(activeOscOutputValid));
+  memset(activeGmOutputValid, 0, sizeof(activeGmOutputValid));
 }
 
 void silenceSynthOnly() {
@@ -1745,6 +1930,10 @@ void silenceSynthOnly() {
   sendCC(GM_CH, 64, 0);
   sendCC(GM_CH, 123, 0);
   sendCC(GM_CH, 120, 0);
+
+  // All Notes Off / All Sound Off invalidates every tracked SAM voice.
+  clearOutputNoteTracking();
+
   currentMonoNote = -1;
   monoAnchorNote = -1;
   monoTargetNote = -1;
@@ -1798,24 +1987,95 @@ int16_t lastHeldNote() {
 }
 
 void sendOscNote(uint8_t oscIndex, uint8_t messageType, uint8_t inputNote, uint8_t velocity) {
-  const OscState& o = currentPreset.osc[oscIndex];
-  if (o.level == 0) return;
+  if (oscIndex >= 3 || inputNote > 127) return;
 
-  int note = (int)inputNote + o.transpose;
-  if (note < 0 || note > 127) return;
+  const uint8_t type = messageType & 0xF0;
+  const bool noteOn = (type == 0x90 && velocity > 0);
+  const bool noteOff = (type == 0x80 || (type == 0x90 && velocity == 0));
 
-  sendMidi3(messageType | (OSC_CH[oscIndex] & 0x0F),
-            note & 0x7F,
-            velocity & 0x7F);
+  if (noteOn) {
+    if (!oscEnabled(oscIndex)) return;
+
+    const OscState& o = currentPreset.osc[oscIndex];
+    int note = (int)inputNote + o.transpose;
+    if (note < 0 || note > 127) return;
+
+    // Defensive de-duplication: if this input note already owns a SAM note,
+    // release the previous one before replacing it.
+    if (activeOscOutputValid[oscIndex][inputNote]) {
+      sendMidi3(0x80 | (OSC_CH[oscIndex] & 0x0F),
+                activeOscOutputNote[oscIndex][inputNote],
+                0);
+    }
+
+    sendMidi3(0x90 | (OSC_CH[oscIndex] & 0x0F),
+              note & 0x7F,
+              velocity & 0x7F);
+    activeOscOutputNote[oscIndex][inputNote] = note & 0x7F;
+    activeOscOutputValid[oscIndex][inputNote] = true;
+    return;
+  }
+
+  if (noteOff) {
+    // Crucial: NoteOff is based on the exact note that was sent at NoteOn,
+    // not today's LVL/ENA/transpose. Sound design edits while holding a key
+    // therefore cannot strand a voice.
+    if (activeOscOutputValid[oscIndex][inputNote]) {
+      sendMidi3(0x80 | (OSC_CH[oscIndex] & 0x0F),
+                activeOscOutputNote[oscIndex][inputNote],
+                velocity & 0x7F);
+      activeOscOutputValid[oscIndex][inputNote] = false;
+      return;
+    }
+
+    // Harmless fallback for any voice created before tracking was established.
+    const OscState& o = currentPreset.osc[oscIndex];
+    int note = (int)inputNote + o.transpose;
+    if (note >= 0 && note <= 127) {
+      sendMidi3(0x80 | (OSC_CH[oscIndex] & 0x0F),
+                note & 0x7F,
+                velocity & 0x7F);
+    }
+  }
 }
 
 void sendGmLayerNote(uint8_t messageType, uint8_t inputNote, uint8_t velocity) {
-  if (currentGmLayer.level == 0) return;
+  if (inputNote > 127) return;
 
-  int note = (int)inputNote + currentGmLayer.transpose;
-  if (note < 0 || note > 127) return;
+  const uint8_t type = messageType & 0xF0;
+  const bool noteOn = (type == 0x90 && velocity > 0);
+  const bool noteOff = (type == 0x80 || (type == 0x90 && velocity == 0));
 
-  sendMidi3(messageType | (GM_CH & 0x0F), note & 0x7F, velocity & 0x7F);
+  if (noteOn) {
+    if (currentGmLayer.level == 0) return;
+
+    int note = (int)inputNote + currentGmLayer.transpose;
+    if (note < 0 || note > 127) return;
+
+    if (activeGmOutputValid[inputNote]) {
+      sendMidi3(0x80 | (GM_CH & 0x0F), activeGmOutputNote[inputNote], 0);
+    }
+
+    sendMidi3(0x90 | (GM_CH & 0x0F), note & 0x7F, velocity & 0x7F);
+    activeGmOutputNote[inputNote] = note & 0x7F;
+    activeGmOutputValid[inputNote] = true;
+    return;
+  }
+
+  if (noteOff) {
+    if (activeGmOutputValid[inputNote]) {
+      sendMidi3(0x80 | (GM_CH & 0x0F),
+                activeGmOutputNote[inputNote],
+                velocity & 0x7F);
+      activeGmOutputValid[inputNote] = false;
+      return;
+    }
+
+    int note = (int)inputNote + currentGmLayer.transpose;
+    if (note >= 0 && note <= 127) {
+      sendMidi3(0x80 | (GM_CH & 0x0F), note & 0x7F, velocity & 0x7F);
+    }
+  }
 }
 
 void sendLayeredNote(uint8_t messageType, uint8_t inputNote, uint8_t velocity) {
@@ -1864,6 +2124,7 @@ void applyCurrentPresetToSynth(bool rebuildNotes = true) {
   silenceSynthOnly();
   resetModulationRuntime();
   invalidateLiveCutoffCache();
+  invalidateLiveAmpCache();
 
   applyMasterVolume();
 
@@ -1929,8 +2190,12 @@ void handleNoteOn(uint8_t note, uint8_t velocity) {
   }
 
   if (heldInput[note]) {
-    heldVelocity[note] = velocity;
-    return;
+    // A second NoteOn for a note we still believe is held usually means the
+    // matching NoteOff was lost upstream. Quietly resync instead of preserving
+    // a potentially stuck internal state.
+    silenceSynthOnly();
+    clearHeldState();
+    recoveringFromPanic = false;
   }
 
   heldInput[note] = true;
@@ -2229,6 +2494,17 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
       return;
     }
 
+    if (cc == 120 || cc == 123) {
+      // Honor keyboard-side All Sound Off / All Notes Off as a full input
+      // state resync too; forwarding it without clearing heldInput would make
+      // the next NoteOn look like a duplicate held key.
+      silenceSynthOnly();
+      clearHeldState();
+      keyboardSustain = false;
+      recoveringFromPanic = false;
+      return;
+    }
+
     if (cc == 7) {
       // Keyboard CC7 and PERFORMANCE 8Angle VOL are the same logical control.
       // Update the shared value so both sound and on-screen VOL follow CC7.
@@ -2271,17 +2547,15 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
   }
 
   if (cin == 0xE) {
-    // Software portamento owns Pitch Bend while a legato phrase is active.
-    // Combining wheel bend with glide can be added later; for now avoid the
-    // two controllers fighting over the same 14-bit bend value.
+    // Software portamento owns the base Pitch Bend while a legato phrase is
+    // active. Outside that mode, preserve the external wheel and add modular
+    // pitch movement on top of it.
     if (softwareMonoVoiceActive()) return;
 
-    for (uint8_t i = 0; i < 3; ++i) {
-      sendPitchBendRaw(OSC_CH[i], packet[2], packet[3]);
-    }
-    if (currentGmLayer.level > 0) {
-      sendPitchBendRaw(GM_CH, packet[2], packet[3]);
-    }
+    performanceBendCurrent =
+        (int16_t)(((uint16_t)(packet[3] & 0x7F) << 7) |
+                  (uint16_t)(packet[2] & 0x7F));
+    sendSoftwareBendAll(performanceBendCurrent);
     return;
   }
 
@@ -2329,6 +2603,7 @@ void loadPreset(uint8_t bank, uint8_t slot) {
 
   loadPresetData(currentPresetIndex(), currentPreset);
   loadGmLayerData(currentPresetIndex(), currentGmLayer);
+  loadOscLayerData(currentPresetIndex(), currentPreset, currentOscLayer);
 
   // PERFORMANCE physical Portamento knob is authoritative.
   if (!configMode) {
@@ -2419,7 +2694,7 @@ uint8_t currentParamAs127(uint8_t knob) {
       case 4: return mapSignedTo127(o.cutoffTrim, -63, 63);
       case 5: return mapSignedTo127(o.resonanceTrim, -63, 63);
       case 6: return o.pan;
-      case 7: return 0;
+      case 7: return oscEnabled(selectedOsc) ? 127 : 0;
     }
   }
 
@@ -2466,7 +2741,12 @@ uint8_t currentParamAs127(uint8_t knob) {
         uint8_t src = (route.source <= MODSRC_LFO3) ? route.source : (uint8_t)MODSRC_NONE;
         return (uint8_t)(((uint16_t)src * 127) / MODSRC_LFO3);
       }
-      case 1: return route.destination == MODDST_CUTOFF ? 127 : 0;
+      case 1: {
+        uint8_t dst = route.destination <= MODDST_AMP
+                    ? route.destination
+                    : (uint8_t)MODDST_NONE;
+        return (uint8_t)(((uint16_t)dst * 127) / MODDST_AMP);
+      }
       case 2: return mapSignedTo127(route.amount, -127, 127);
       case 3: return route.enabled ? 127 : 0;
       default: return 0;
@@ -2494,7 +2774,7 @@ bool knobIsReserved(uint8_t knob) {
 
   if (page == PAGE_FILTER_ENV) return knob >= 5;
   if (page == PAGE_VOICE_ENV) return knob >= 3;
-  if (page == PAGE_OSC) return knob == 7;
+  if (page == PAGE_OSC) return false;
   if (page == PAGE_GM) return knob >= 4;
   if (page == PAGE_ENV) return knob >= 6;
   if (page == PAGE_LFO) return knob >= 6;
@@ -2808,7 +3088,7 @@ void applyOscPageKnob(uint8_t knob, uint8_t v) {
     case 1:
       if (o.level != v) {
         o.level = v;
-        synth.setVolume(OSC_CH[oi], o.level);
+        sendLiveAmpOsc(oi, true);
         changed = true;
       }
       break;
@@ -2863,8 +3143,19 @@ void applyOscPageKnob(uint8_t knob, uint8_t v) {
       }
       break;
 
-    case 7:
-      return;
+    case 7: {
+      bool enabled = v >= 64;
+      if (oscEnabled(oi) != enabled) {
+        setOscEnabled(oi, enabled);
+        changed = true;
+
+        // Switching layer participation while notes are held is deliberately
+        // handled as a full stop/rebuild. This prevents an old NoteOn from
+        // surviving on a layer that has just been disabled.
+        reapplyAndRebuild();
+      }
+      break;
+    }
   }
 
   if (changed) markModified();
@@ -2894,7 +3185,7 @@ void applyGmPageKnob(uint8_t knob, uint8_t v) {
         if ((oldLevel == 0) != (v == 0)) {
           reapplyAndRebuild();
         } else {
-          synth.setVolume(GM_CH, currentGmLayer.level);
+          sendLiveAmpGm(true);
         }
       }
       break;
@@ -2982,7 +3273,10 @@ void applyEnvPageKnob(uint8_t knob, uint8_t v) {
       return;
   }
 
-  if (changed) markModified();
+  if (changed) {
+    markModified();
+    refreshModulationOutputs(false);
+  }
 }
 
 void applyLfoPageKnob(uint8_t knob, uint8_t v) {
@@ -3017,7 +3311,7 @@ void applyLfoPageKnob(uint8_t knob, uint8_t v) {
   if (changed) {
     markModified();
     resetLfoRuntime();
-    sendLiveCutoffAll();
+    refreshModulationOutputs(false);
   }
 }
 
@@ -3035,7 +3329,8 @@ void applyRoutePageKnob(uint8_t knob, uint8_t v) {
     }
 
     case 1: {
-      uint8_t destination = v >= 64 ? MODDST_CUTOFF : MODDST_NONE;
+      uint8_t destination = (uint8_t)(((uint16_t)v * 4) / 128);
+      if (destination > MODDST_AMP) destination = MODDST_AMP;
       changed = route.destination != destination;
       route.destination = destination;
       break;
@@ -3060,7 +3355,7 @@ void applyRoutePageKnob(uint8_t knob, uint8_t v) {
   }
 
   if (changed) {
-    sendLiveCutoffAll();
+    refreshModulationOutputs(true);
     markModified();
   }
 }
@@ -4796,7 +5091,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.8");
+  M5.Display.print("FW          : v1.10.9");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -4850,7 +5145,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.8  LATEST ");
+    M5.Display.print("FW v1.10.9  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -5078,6 +5373,15 @@ const char* routeSourceLabel(uint8_t source) {
   }
 }
 
+const char* routeDestinationLabel(uint8_t destination) {
+  switch (destination) {
+    case MODDST_CUTOFF: return "CUT";
+    case MODDST_PITCH: return "PIT";
+    case MODDST_AMP: return "AMP";
+    default: return "---";
+  }
+}
+
 const char* lfoWaveLabel(uint8_t waveform) {
   switch (waveform) {
     case LFO_WAVE_SINE: return "SIN";
@@ -5137,7 +5441,7 @@ void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
     const ModRoute& route = currentPreset.routes[selectedRoute];
     switch (knob) {
       case 0: snprintf(out, n, "%s", routeSourceLabel(route.source)); return;
-      case 1: snprintf(out, n, "%s", route.destination == MODDST_CUTOFF ? "CUT" : "---"); return;
+      case 1: snprintf(out, n, "%s", routeDestinationLabel(route.destination)); return;
       case 2: snprintf(out, n, "%+d", route.amount); return;
       case 3: snprintf(out, n, "%s", route.enabled ? "ON" : "--"); return;
       default: snprintf(out, n, "-"); return;
@@ -5169,6 +5473,9 @@ void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
         return;
       case 6:
         snprintf(out, n, "%u", o.pan);
+        return;
+      case 7:
+        snprintf(out, n, "%s", oscEnabled(oi) ? "ON" : "--");
         return;
       default:
         snprintf(out, n, "-");
@@ -5465,6 +5772,7 @@ void synthAppSetup() {
 
   loadPresetData(currentPresetIndex(), currentPreset);
   loadGmLayerData(currentPresetIndex(), currentGmLayer);
+  loadOscLayerData(currentPresetIndex(), currentPreset, currentOscLayer);
 
   // Current physical volume is authoritative at boot.
   uint16_t volRaw = angle8.getAnalogInput(0, _12bit);
@@ -5499,7 +5807,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.8");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.9");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -5553,7 +5861,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.8
+  Version: v1.10.9
   END
   ======================================================================
 */

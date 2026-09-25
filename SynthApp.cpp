@@ -1240,7 +1240,7 @@ void updateModulationEngine() {
   if (cutoffActive) {
     // Only active oscillator layers need continuous GS filter updates.
     for (uint8_t i = 0; i < 3; ++i) {
-      if (currentPreset.osc[i].level > 0) sendLiveCutoff(i);
+      if (oscEnabled(i) && currentPreset.osc[i].level > 0) sendLiveCutoff(i);
     }
   }
 
@@ -1248,7 +1248,7 @@ void updateModulationEngine() {
 
   if (ampActive) {
     for (uint8_t i = 0; i < 3; ++i) {
-      if (currentPreset.osc[i].level > 0) sendLiveAmpOsc(i);
+      if (oscEnabled(i) && currentPreset.osc[i].level > 0) sendLiveAmpOsc(i);
     }
     if (currentGmLayer.level > 0) sendLiveAmpGm();
   }
@@ -5458,6 +5458,9 @@ void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
         return;
       case 6:
         snprintf(out, n, "%u", o.pan);
+        return;
+      case 7:
+        snprintf(out, n, "%s", oscEnabled(oi) ? "ON" : "--");
         return;
       default:
         snprintf(out, n, "-");

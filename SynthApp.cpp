@@ -1626,6 +1626,43 @@ void gmLayerKey(uint8_t index, char* out, size_t outSize) {
   snprintf(out, outSize, "g%02u", index);
 }
 
+void oscLayerKey(uint8_t index, char* out, size_t outSize) {
+  snprintf(out, outSize, "o%02u", index);
+}
+
+OscLayerState defaultOscLayer(const Preset& preset) {
+  OscLayerState state = {OSC_LAYER_VERSION, 0};
+
+  // Preserve the audible behavior of all existing presets on first load:
+  // layers that already had non-zero level start enabled; silent layers start
+  // disabled and can now be explicitly enabled from the OS page.
+  for (uint8_t i = 0; i < 3; ++i) {
+    if (preset.osc[i].level > 0) state.enabledMask |= (1u << i);
+  }
+  return state;
+}
+
+void loadOscLayerData(uint8_t index, const Preset& preset, OscLayerState& out) {
+  out = defaultOscLayer(preset);
+
+  char key[8];
+  oscLayerKey(index, key, sizeof(key));
+  if (prefs.getBytesLength(key) != sizeof(OscLayerState)) return;
+
+  OscLayerState stored{};
+  prefs.getBytes(key, &stored, sizeof(stored));
+  if (stored.version != OSC_LAYER_VERSION) return;
+
+  stored.enabledMask &= 0x07;
+  out = stored;
+}
+
+void saveOscLayerData(uint8_t index, const OscLayerState& state) {
+  char key[8];
+  oscLayerKey(index, key, sizeof(key));
+  prefs.putBytes(key, &state, sizeof(state));
+}
+
 GmLayerState defaultGmLayer(uint8_t index) {
   GmLayerState state = {GM_LAYER_VERSION, 0, 0, 0, 64};
   const uint8_t gmStart = GM_BANK_INDEX * PRESETS_PER_BANK;
@@ -1705,6 +1742,7 @@ void saveCurrentPreset() {
   presetKey(currentPresetIndex(), key, sizeof(key));
   prefs.putBytes(key, &currentPreset, sizeof(Preset));
   saveGmLayerData(currentPresetIndex(), currentGmLayer);
+  saveOscLayerData(currentPresetIndex(), currentOscLayer);
   modified = false;
   screenDirty = true;
 }
@@ -2468,6 +2506,7 @@ void loadPreset(uint8_t bank, uint8_t slot) {
 
   loadPresetData(currentPresetIndex(), currentPreset);
   loadGmLayerData(currentPresetIndex(), currentGmLayer);
+  loadOscLayerData(currentPresetIndex(), currentPreset, currentOscLayer);
 
   // PERFORMANCE physical Portamento knob is authoritative.
   if (!configMode) {
@@ -5622,6 +5661,7 @@ void synthAppSetup() {
 
   loadPresetData(currentPresetIndex(), currentPreset);
   loadGmLayerData(currentPresetIndex(), currentGmLayer);
+  loadOscLayerData(currentPresetIndex(), currentPreset, currentOscLayer);
 
   // Current physical volume is authoritative at boot.
   uint16_t volRaw = angle8.getAnalogInput(0, _12bit);

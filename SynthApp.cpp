@@ -2190,8 +2190,12 @@ void handleNoteOn(uint8_t note, uint8_t velocity) {
   }
 
   if (heldInput[note]) {
-    heldVelocity[note] = velocity;
-    return;
+    // A second NoteOn for a note we still believe is held usually means the
+    // matching NoteOff was lost upstream. Quietly resync instead of preserving
+    // a potentially stuck internal state.
+    silenceSynthOnly();
+    clearHeldState();
+    recoveringFromPanic = false;
   }
 
   heldInput[note] = true;
@@ -2487,6 +2491,17 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
     if (cc == 64) {
       keyboardSustain = (value >= 64);
       applyPedalsAll();
+      return;
+    }
+
+    if (cc == 120 || cc == 123) {
+      // Honor keyboard-side All Sound Off / All Notes Off as a full input
+      // state resync too; forwarding it without clearing heldInput would make
+      // the next NoteOn look like a duplicate held key.
+      silenceSynthOnly();
+      clearHeldState();
+      keyboardSustain = false;
+      recoveringFromPanic = false;
       return;
     }
 

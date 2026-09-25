@@ -1068,3 +1068,25 @@ v1.10.8 CONFIG button layout cleanup
 - Renames the old ambiguous PAN label to PNC for PANIC.
 - Moves the CONFIG audition TST control to the far-right button.
 - PANIC remains a red action button; TST remains a normal ON/OFF state.
+
+
+v1.10.9 ROUTE destinations + OSC enable/note safety
+---------------------------------------------------
+- ROUTE DST now offers --- / CUT / PIT / AMP.
+- PIT is summed with DinMeter software glide or the external pitch wheel
+  instead of overwriting either controller. Full route depth is about
+  +/-2 semitones.
+- AMP derives live channel volume from each layer's saved base level.
+  Positive ENV -> AMP can act as a VCA contour; LFO -> AMP acts as tremolo.
+- Modular output cadence is ~31 Hz to leave MIDI bandwidth for CUT/PIT/AMP.
+- OSC CONFIG now uses WAV / LVL / OCT / DET / CUT / RES / PAN / ENA.
+- ENA is persisted per preset in a versioned NVS sidecar, avoiding a Preset
+  binary-layout migration. Existing presets default ENA from their saved LVL.
+- LVL=0 no longer means disabled. An enabled oscillator still receives NoteOn
+  at LVL 0, so its level can be raised while a key is held.
+- NoteOff now tracks the exact SAM output note created by each input NoteOn.
+  Changing LVL, ENA, or transpose while holding a key can no longer suppress
+  the corresponding NoteOff.
+- Duplicate NoteOn without a prior NoteOff and incoming CC120/CC123 trigger a
+  quiet state resync as extra protection against controller/USB note loss.
+- VOICE ENV CONFIG tab abbreviation changes from VN to VE.

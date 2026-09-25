@@ -309,10 +309,28 @@ struct __attribute__((packed)) GmLayerState {
   uint8_t pan;
 };
 
+struct __attribute__((packed)) OscLayerState {
+  uint8_t version;
+  uint8_t enabledMask; // bits 0..2 = OSC1..3
+};
+
 static constexpr uint8_t GM_LAYER_VERSION = 1;
+static constexpr uint8_t OSC_LAYER_VERSION = 1;
 
 Preset currentPreset;
 GmLayerState currentGmLayer = {GM_LAYER_VERSION, 0, 0, 0, 64};
+OscLayerState currentOscLayer = {OSC_LAYER_VERSION, 0x07};
+
+bool oscEnabled(uint8_t osc) {
+  if (osc >= 3) return false;
+  return (currentOscLayer.enabledMask & (1u << osc)) != 0;
+}
+
+void setOscEnabled(uint8_t osc, bool enabled) {
+  if (osc >= 3) return;
+  if (enabled) currentOscLayer.enabledMask |= (1u << osc);
+  else         currentOscLayer.enabledMask &= ~(1u << osc);
+}
 
 uint8_t browseBank  = 0;  // encoder selects this bank
 uint8_t loadedBank  = 0;  // actually sounding bank
@@ -436,7 +454,7 @@ static const char* PAGE_NAMES[PAGE_COUNT] = {
 };
 
 static const char* PAGE_TAB[PAGE_COUNT] = {
-  "PF", "TN", "VN", "OS", "GM", "EN", "LF", "RT", "MD"
+  "PF", "TN", "VE", "OS", "GM", "EN", "LF", "RT", "MD"
 };
 
 static const char* PERF_LABELS[8] = {
@@ -452,7 +470,7 @@ static const char* VOICE_ENV_LABELS[8] = {
 };
 
 static const char* OSC_LABELS[8] = {
-  "WAV", "LVL", "OCT", "DET", "CUT", "RES", "PAN", "---"
+  "WAV", "LVL", "OCT", "DET", "CUT", "RES", "PAN", "ENA"
 };
 
 static const char* GM_LABELS[8] = {
@@ -488,6 +506,13 @@ uint8_t heldVelocity[128] = {};
 uint8_t noteOrder[128] = {};
 uint8_t heldCount = 0;
 int16_t currentMonoNote = -1;
+
+// Exact SAM note tracking. NoteOff must target the note that was actually sent,
+// even if transpose/level/enable changes while a key is still held.
+uint8_t activeOscOutputNote[3][128] = {};
+bool activeOscOutputValid[3][128] = {};
+uint8_t activeGmOutputNote[128] = {};
+bool activeGmOutputValid[128] = {};
 
 // ======================================================================
 // Modular modulation runtime
@@ -1419,10 +1444,6 @@ uint8_t browsePresetIndex(uint8_t logicalSlot) {
 
 uint8_t logicalToPhysicalButton(uint8_t logical) {
   return 7 - logical;
-}
-
-bool oscEnabled(uint8_t osc) {
-  return currentPreset.osc[osc].level > 0;
 }
 
 uint8_t scaledOscLevel(uint8_t v) {

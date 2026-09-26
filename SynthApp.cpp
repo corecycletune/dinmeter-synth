@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.12
+  Version: v1.10.13
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -36,7 +36,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.12";
+  "DINMETER_FW_VERSION=v1.10.13";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -1129,10 +1129,11 @@ void updateEnvelopeRuntime(uint8_t i, uint32_t nowMs) {
 }
 
 float lfoRateHz(uint8_t value) {
-  // Exponential musical range. The current GS cutoff transport is rate-limited
-  // to ~42 updates/s, so cap this first implementation at 8 Hz.
+  // Cubic musical mapping spreads the practically useful 1..8 Hz region over
+  // much more of the knob travel. Approximate anchors:
+  // 0=0.05 Hz, 32=0.18, 64=1.07, 96=3.48, 110=5.23, 127=8.0.
   const float normalized = (float)value / 127.0f;
-  return 0.05f * powf(160.0f, normalized); // 0.05 .. 8.0 Hz
+  return 0.05f + 7.95f * normalized * normalized * normalized;
 }
 
 uint32_t lfoTimeMs(uint8_t value) {
@@ -1505,7 +1506,7 @@ void initModularDefaults(Preset& p) {
 }
 
 void migrateStoredPresetV1910(const StoredPresetV1910& oldPreset, Preset& out) {
-  // Preset keeps the entire v1.10.12 object as a byte-compatible prefix.
+  // Preset keeps the entire v1.10.13 object as a byte-compatible prefix.
   memcpy(&out, &oldPreset, sizeof(oldPreset));
   initModularDefaults(out);
 }
@@ -1871,14 +1872,15 @@ void applyPedalsAll() {
 }
 
 void applyMonoModeAll() {
-  // SAM2695 supports MIDI mono/poly channel mode directly.
+  // IMPORTANT: SAM2695 is kept internally POLY at all times.
+  // DinMeter already owns note priority in handleNoteOn/Off, so enabling the
+  // SAM's native MIDI Mono Mode (CC126) would create two independent mono
+  // state machines. Rapid overlapping notes can then leave the SAM channel in
+  // a bad state that survives PANIC and USB-keyboard reconnects.
   for (uint8_t i = 0; i < 3; ++i) {
-    if (currentPreset.mono) {
-      sendCC(OSC_CH[i], 126, 1);  // Mono Mode On
-    } else {
-      sendCC(OSC_CH[i], 127, 0);  // Poly Mode On
-    }
+    sendCC(OSC_CH[i], 127, 0);  // Poly Mode On
   }
+  sendCC(GM_CH, 127, 0);
 }
 
 void applyGlideTimeAll() {
@@ -1890,37 +1892,28 @@ void applyGlideTimeAll() {
 }
 
 void applyPortamentoSwitchAll() {
+  // Native SAM2695 portamento remains OFF. DinMeter implements GLIDE itself
+  // with Pitch Bend so note ownership stays in one place.
   for (uint8_t i = 0; i < 3; ++i) {
-    sendCC(OSC_CH[i], 65, currentPreset.glide ? 127 : 0);
+    sendCC(OSC_CH[i], 65, 0);
   }
+  sendCC(GM_CH, 65, 0);
 }
 
 void applyModeAndGlideAll() {
-  if (softwareMonoVoiceActive()) {
-    // DinMeter owns mono note priority whenever GLIDE or LEGATO is active.
-    // Keep SAM2695 internally poly with native portamento OFF; only DinMeter
-    // decides whether pitch glides and whether the envelope is retriggered.
-    for (uint8_t i = 0; i < 3; ++i) {
-      sendCC(OSC_CH[i], 127, 0);  // Poly Mode On internally
-      sendCC(OSC_CH[i], 65, 0);   // native Portamento Off
-      setPitchBendRange(OSC_CH[i], SOFTWARE_GLIDE_BEND_RANGE);
-    }
-    sendCC(GM_CH, 127, 0);
-    sendCC(GM_CH, 65, 0);
-    setPitchBendRange(GM_CH, SOFTWARE_GLIDE_BEND_RANGE);
-    resetSoftwareBend(true);
-    return;
-  }
-
+  // One owner only: SAM stays POLY with native portamento disabled, while
+  // DinMeter implements MONO / last-note priority / LEGATO / GLIDE.
   applyMonoModeAll();
   applyGlideTimeAll();
   applyPortamentoSwitchAll();
+
+  const uint8_t bendRange =
+      softwareMonoVoiceActive() ? SOFTWARE_GLIDE_BEND_RANGE : 2;
+
   for (uint8_t i = 0; i < 3; ++i) {
-    setPitchBendRange(OSC_CH[i], 2);
+    setPitchBendRange(OSC_CH[i], bendRange);
   }
-  sendCC(GM_CH, 127, 0);
-  sendCC(GM_CH, 65, 0);
-  setPitchBendRange(GM_CH, 2);
+  setPitchBendRange(GM_CH, bendRange);
   resetSoftwareBend(true);
 }
 
@@ -1973,10 +1966,19 @@ void silenceSynthOnly() {
     sendCC(OSC_CH[i], 64, 0);
     sendCC(OSC_CH[i], 123, 0);
     sendCC(OSC_CH[i], 120, 0);
+
+    // PANIC / rebuild must also clear persistent channel-mode state.
+    // CC120/123 stop sound but do not guarantee that native Mono Mode is left.
+    sendCC(OSC_CH[i], 127, 0);  // force internal Poly Mode
+    sendCC(OSC_CH[i], 65, 0);   // native Portamento Off
+    sendPitchBendRaw(OSC_CH[i], 0, 64);
   }
   sendCC(GM_CH, 64, 0);
   sendCC(GM_CH, 123, 0);
   sendCC(GM_CH, 120, 0);
+  sendCC(GM_CH, 127, 0);
+  sendCC(GM_CH, 65, 0);
+  sendPitchBendRaw(GM_CH, 0, 64);
 
   // All Notes Off / All Sound Off invalidates every tracked SAM voice.
   clearOutputNoteTracking();
@@ -5468,7 +5470,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.12");
+  M5.Display.print("FW          : v1.10.13");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -5522,7 +5524,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.12  LATEST ");
+    M5.Display.print("FW v1.10.13  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -5792,7 +5794,7 @@ void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
     const LfoState& lfo = currentPreset.lfo[selectedLfo];
     switch (knob) {
       case 0: snprintf(out, n, "%s", lfoWaveLabel(lfo.waveform)); return;
-      case 1: snprintf(out, n, "%u", lfo.rate); return;
+      case 1: snprintf(out, n, "%.2fHz", lfoRateHz(lfo.rate)); return;
       case 2: snprintf(out, n, "%u", lfo.delay); return;
       case 3: snprintf(out, n, "%u", lfo.fade); return;
       case 4: snprintf(out, n, "%s", lfo.retrigger ? "ON" : "--"); return;
@@ -6190,7 +6192,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.12");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.13");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -6244,7 +6246,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.12
+  Version: v1.10.13
   END
   ======================================================================
 */

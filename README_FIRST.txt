@@ -1126,3 +1126,16 @@ v1.10.12 portamento default 20
 - Changes the default GLD TIME / portamento time from 40 to 20.
 - Existing saved preset values are not overwritten; the new value applies to
   factory/default/INIT preset generation.
+
+
+v1.10.13 single-owner MONO + LFO rate
+--------------------------------------
+- Removes SAM2695 native MIDI Mono Mode (CC126) from DinMeter operation.
+- SAM2695 channels now remain internally POLY; DinMeter alone owns MONO,
+  last-note priority, LEGATO and GLIDE behavior.
+- PANIC/rebuild now explicitly forces SAM channels back to POLY, disables
+  native portamento and centers Pitch Bend, preventing bad channel-mode state
+  from surviving a keyboard reconnect.
+- LFO RATE changes from exponential mapping to a cubic 0.05..8 Hz curve.
+  This spreads the useful 1..8 Hz range across much more knob travel.
+- LFO RATE is displayed as actual Hz instead of the raw 0..127 value.

@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.10
+  Version: v1.10.11
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -36,7 +36,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.10";
+  "DINMETER_FW_VERSION=v1.10.11";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -725,9 +725,32 @@ bool usbFlashChoiceYes = false;
 
 bool systemInfoActive = false;
 
-static constexpr uint8_t SYSTEM_MENU_COUNT = 7;
+enum PresetToolAction : uint8_t {
+  PRESET_TOOL_COPY = 0,
+  PRESET_TOOL_MOVE,
+  PRESET_TOOL_DELETE
+};
+
+bool presetToolsMenuActive = false;
+uint8_t presetToolsMenuIndex = 0;
+bool presetToolTargetActive = false;
+uint8_t presetToolTargetIndex = 0;
+bool presetToolConfirmActive = false;
+bool presetToolChoiceYes = false;
+PresetToolAction presetToolAction = PRESET_TOOL_COPY;
+
+static constexpr uint8_t PRESET_TOOLS_MENU_COUNT = 4;
+static const char* PRESET_TOOLS_MENU_ITEMS[PRESET_TOOLS_MENU_COUNT] = {
+  "COPY CURRENT",
+  "MOVE CURRENT",
+  "DELETE CURRENT",
+  "BACK"
+};
+
+static constexpr uint8_t SYSTEM_MENU_COUNT = 8;
 static const char* SYSTEM_MENU_ITEMS[SYSTEM_MENU_COUNT] = {
   "SAVE PRESET",
+  "PRESET TOOLS",
   "MAINTENANCE",
   "WIFI SETUP",
   "WIFI SELECT",
@@ -1482,7 +1505,7 @@ void initModularDefaults(Preset& p) {
 }
 
 void migrateStoredPresetV1910(const StoredPresetV1910& oldPreset, Preset& out) {
-  // Preset keeps the entire v1.10.10 object as a byte-compatible prefix.
+  // Preset keeps the entire v1.10.11 object as a byte-compatible prefix.
   memcpy(&out, &oldPreset, sizeof(oldPreset));
   initModularDefaults(out);
 }
@@ -1739,12 +1762,36 @@ void loadPresetData(uint8_t index, Preset& out) {
   }
 }
 
-void saveCurrentPreset() {
+void savePresetBundle(uint8_t index,
+                      const Preset& preset,
+                      const GmLayerState& gmLayer,
+                      const OscLayerState& oscLayer) {
+  if (index >= PRESET_COUNT) return;
+
   char key[8];
-  presetKey(currentPresetIndex(), key, sizeof(key));
-  prefs.putBytes(key, &currentPreset, sizeof(Preset));
-  saveGmLayerData(currentPresetIndex(), currentGmLayer);
-  saveOscLayerData(currentPresetIndex(), currentOscLayer);
+  presetKey(index, key, sizeof(key));
+  prefs.putBytes(key, &preset, sizeof(Preset));
+  saveGmLayerData(index, gmLayer);
+  saveOscLayerData(index, oscLayer);
+}
+
+void deletePresetBundle(uint8_t index) {
+  if (index >= PRESET_COUNT) return;
+
+  char key[8];
+
+  presetKey(index, key, sizeof(key));
+  prefs.remove(key);
+
+  gmLayerKey(index, key, sizeof(key));
+  prefs.remove(key);
+
+  oscLayerKey(index, key, sizeof(key));
+  prefs.remove(key);
+}
+
+void saveCurrentPreset() {
+  savePresetBundle(currentPresetIndex(), currentPreset, currentGmLayer, currentOscLayer);
   modified = false;
   screenDirty = true;
 }
@@ -2185,17 +2232,23 @@ void retriggerSoftwareMonoEnvelope(uint8_t velocity) {
 
 void handleNoteOn(uint8_t note, uint8_t velocity) {
   if (recoveringFromPanic) {
-    clearHeldState();
+    // panicAll() already cleared the held-note model. The first fresh NoteOn
+    // simply ends recovery; late NoteOff messages are handled harmlessly below.
     recoveringFromPanic = false;
   }
 
   if (heldInput[note]) {
-    // A second NoteOn for a note we still believe is held usually means the
-    // matching NoteOff was lost upstream. Quietly resync instead of preserving
-    // a potentially stuck internal state.
+    // A duplicate NoteOn most often means that this pitch lost its NoteOff.
+    // Preserve every OTHER physically-held key, stop the current synth voices,
+    // rebuild from the surviving held-note model, then accept this NoteOn as
+    // the new owner of the duplicated pitch.
+    heldInput[note] = false;
+    heldVelocity[note] = 0;
+    removeNoteOrder(note);
+
     silenceSynthOnly();
-    clearHeldState();
-    recoveringFromPanic = false;
+    rebuildHeldNotes();
+    applyPedalsAll();
   }
 
   heldInput[note] = true;
@@ -2248,14 +2301,27 @@ void handleNoteOn(uint8_t note, uint8_t velocity) {
 
 void handleNoteOff(uint8_t note, uint8_t velocity) {
   if (!heldInput[note]) {
-    if (recoveringFromPanic) return;
+    // A late/duplicate NoteOff is harmless and is common after PANIC, USB
+    // recovery, or a local duplicate-NoteOn repair. Never turn one stale
+    // NoteOff into a second global PANIC. Release that pitch best-effort and,
+    // if it was part of DinMeter's software-mono voice, rebuild only the
+    // surviving held-note model.
+    const bool touchedMonoVoice =
+        (currentMonoNote == (int16_t)note) ||
+        (monoAnchorNote == (int16_t)note);
 
-    // Existing stuck-note protection. This is independent of the mono voice
-    // manager and can be relaxed separately if necessary.
-    panicAll("NOTE DESYNC");
+    removeNoteOrder(note);
+    sendLayeredNote(0x80, note, velocity);
+
+    if (touchedMonoVoice) {
+      silenceSynthOnly();
+      rebuildHeldNotes();
+      applyPedalsAll();
+    }
     return;
   }
 
+  recoveringFromPanic = false;
   heldInput[note] = false;
   heldVelocity[note] = 0;
   removeNoteOrder(note);
@@ -2370,6 +2436,9 @@ void updateConfigAudition() {
       configMode &&
       !wifiMaintActive() &&
       !systemMenuActive &&
+      !presetToolsMenuActive &&
+      !presetToolTargetActive &&
+      !presetToolConfirmActive &&
       !wifiSelectActive &&
       !wifiSetupMenuActive &&
       !wifiScanListActive &&
@@ -2621,6 +2690,69 @@ void loadPreset(uint8_t bank, uint8_t slot) {
 
   // Pickup must be re-armed after preset values changed.
   screenDirty = true;
+}
+
+const char* presetToolActionLabel() {
+  switch (presetToolAction) {
+    case PRESET_TOOL_MOVE:   return "MOVE";
+    case PRESET_TOOL_DELETE: return "DELETE";
+    case PRESET_TOOL_COPY:
+    default:                 return "COPY";
+  }
+}
+
+void finishPresetToolOverlay(const char* title, uint8_t index) {
+  snprintf(overlayTitle, sizeof(overlayTitle), "%s", title);
+  snprintf(overlaySub, sizeof(overlaySub), "B%u / P%u",
+           (index / PRESETS_PER_BANK) + 1,
+           (index % PRESETS_PER_BANK) + 1);
+  overlayActive = true;
+  overlayUntil = millis() + 850;
+  screenDirty = true;
+}
+
+void executePresetTool() {
+  const uint8_t sourceIndex = currentPresetIndex();
+
+  if (presetToolAction == PRESET_TOOL_DELETE) {
+    deletePresetBundle(sourceIndex);
+    loadPreset(loadedBank, loadedSlot);
+    presetToolConfirmActive = false;
+    presetToolsMenuActive = false;
+    finishPresetToolOverlay("PRESET RESET", sourceIndex);
+    return;
+  }
+
+  const uint8_t targetIndex = presetToolTargetIndex;
+  if (targetIndex >= PRESET_COUNT || targetIndex == sourceIndex) {
+    presetToolConfirmActive = false;
+    presetToolTargetActive = true;
+    snprintf(overlayTitle, sizeof(overlayTitle), "PRESET TOOL");
+    snprintf(overlaySub, sizeof(overlaySub), "SELECT OTHER SLOT");
+    overlayActive = true;
+    overlayUntil = millis() + 750;
+    screenDirty = true;
+    return;
+  }
+
+  savePresetBundle(targetIndex, currentPreset, currentGmLayer, currentOscLayer);
+
+  if (presetToolAction == PRESET_TOOL_MOVE) {
+    deletePresetBundle(sourceIndex);
+
+    const uint8_t targetBank = targetIndex / PRESETS_PER_BANK;
+    const uint8_t targetSlot = targetIndex % PRESETS_PER_BANK;
+    loadPreset(targetBank, targetSlot);
+
+    presetToolConfirmActive = false;
+    presetToolsMenuActive = false;
+    finishPresetToolOverlay("PRESET MOVED", targetIndex);
+    return;
+  }
+
+  presetToolConfirmActive = false;
+  presetToolsMenuActive = false;
+  finishPresetToolOverlay("PRESET COPIED", targetIndex);
 }
 
 // ======================================================================
@@ -2875,6 +3007,7 @@ void setPortamentoFromPhysical(uint8_t v, bool showPopup) {
 
   applyModeAndGlideAll();
   rebuildHeldNotes();
+  applyPedalsAll();
 
   // Physical position is authoritative, so this is treated like VOL:
   // it does not mark the preset MODIFIED.
@@ -3424,7 +3557,8 @@ void handleConfigModeChange(bool newMode) {
 }
 
 void poll8Angle() {
-  if (wifiMaintActive() || systemMenuActive || wifiSelectActive || wifiSetupMenuActive ||
+  if (wifiMaintActive() || systemMenuActive || presetToolsMenuActive ||
+      presetToolTargetActive || presetToolConfirmActive || wifiSelectActive || wifiSetupMenuActive ||
       wifiScanListActive || textEditorActive || wifiDeleteListActive || wifiDeleteConfirm || saveDialog ||
       maintenanceConfirm || systemInfoActive) return;
 
@@ -3529,6 +3663,7 @@ void toggleConfigButton(uint8_t logical) {
       if (!currentPreset.mono) currentPreset.glide = 0;
       applyModeAndGlideAll();
       rebuildHeldNotes();
+      applyPedalsAll();
       markModified();
       break;
     }
@@ -3539,14 +3674,23 @@ void toggleConfigButton(uint8_t logical) {
       if (currentPreset.glide) currentPreset.mono = 1;
       applyModeAndGlideAll();
       rebuildHeldNotes();
+      applyPedalsAll();
       markModified();
       break;
     }
 
-    case 2: // LEGATO
+    case 2: { // LEGATO
+      // LEGATO changes whether DinMeter owns the software mono voice.
+      // Switching that ownership while a key is sounding without rebuilding
+      // can leave the previous SAM2695 voice orphaned.
+      silenceSynthOnly();
       currentPreset.legato = !currentPreset.legato;
+      applyModeAndGlideAll();
+      rebuildHeldNotes();
+      applyPedalsAll();
       markModified();
       break;
+    }
 
     case 3: // SOFT
       currentPreset.soft = !currentPreset.soft;
@@ -3749,7 +3893,8 @@ void handleBytePress(uint8_t logical) {
 }
 
 void pollByteButton() {
-  if (wifiMaintActive() || systemMenuActive || wifiSelectActive || wifiSetupMenuActive ||
+  if (wifiMaintActive() || systemMenuActive || presetToolsMenuActive ||
+      presetToolTargetActive || presetToolConfirmActive || wifiSelectActive || wifiSetupMenuActive ||
       wifiScanListActive || wifiDeleteListActive || wifiDeleteConfirm || saveDialog ||
       maintenanceConfirm || systemInfoActive) return;
 
@@ -4032,21 +4177,28 @@ void selectSystemMenuItem() {
       openSaveDialog();
       return;
 
-    case 1: // MAINTENANCE
+    case 1: // PRESET TOOLS
+      systemMenuActive = false;
+      presetToolsMenuActive = true;
+      presetToolsMenuIndex = 0;
+      screenDirty = true;
+      return;
+
+    case 2: // MAINTENANCE
       systemMenuActive = false;
       maintenanceConfirm = true;
       maintenanceChoiceYes = false;
       screenDirty = true;
       return;
 
-    case 2: // WIFI SETUP
+    case 3: // WIFI SETUP
       systemMenuActive = false;
       wifiSetupMenuActive = true;
       wifiSetupMenuIndex = 0;
       screenDirty = true;
       return;
 
-    case 3: // WIFI SELECT
+    case 4: // WIFI SELECT
       systemMenuActive = false;
       wifiSelectActive = true;
       {
@@ -4058,20 +4210,20 @@ void selectSystemMenuItem() {
       screenDirty = true;
       return;
 
-    case 4: // USB FLASH
+    case 5: // USB FLASH
       systemMenuActive = false;
       usbFlashConfirm = true;
       usbFlashChoiceYes = false;
       screenDirty = true;
       return;
 
-    case 5: // SYSTEM INFO
+    case 6: // SYSTEM INFO
       systemMenuActive = false;
       systemInfoActive = true;
       screenDirty = true;
       return;
 
-    case 6: // EXIT
+    case 7: // EXIT
     default:
       closeSystemMenu();
       return;
@@ -4165,6 +4317,30 @@ void handleEncoderRotate(int detents) {
     while (next < 0) next += optionCount;
     while (next >= optionCount) next -= optionCount;
     wifiSelectIndex = (uint8_t)next;
+    screenDirty = true;
+    return;
+  }
+
+  if (presetToolConfirmActive) {
+    presetToolChoiceYes = (detents > 0);
+    screenDirty = true;
+    return;
+  }
+
+  if (presetToolTargetActive) {
+    int next = (int)presetToolTargetIndex + detents;
+    while (next < 0) next += PRESET_COUNT;
+    while (next >= PRESET_COUNT) next -= PRESET_COUNT;
+    presetToolTargetIndex = (uint8_t)next;
+    screenDirty = true;
+    return;
+  }
+
+  if (presetToolsMenuActive) {
+    int next = (int)presetToolsMenuIndex + detents;
+    while (next < 0) next += PRESET_TOOLS_MENU_COUNT;
+    while (next >= PRESET_TOOLS_MENU_COUNT) next -= PRESET_TOOLS_MENU_COUNT;
+    presetToolsMenuIndex = (uint8_t)next;
     screenDirty = true;
     return;
   }
@@ -4372,6 +4548,64 @@ void handleEncoderShortPress() {
     return;
   }
 
+  if (presetToolConfirmActive) {
+    if (presetToolChoiceYes) {
+      executePresetTool();
+    } else {
+      presetToolConfirmActive = false;
+      if (presetToolAction == PRESET_TOOL_DELETE) {
+        presetToolsMenuActive = true;
+      } else {
+        presetToolTargetActive = true;
+      }
+      screenDirty = true;
+    }
+    return;
+  }
+
+  if (presetToolTargetActive) {
+    if (presetToolTargetIndex == currentPresetIndex()) {
+      snprintf(overlayTitle, sizeof(overlayTitle), "PRESET TOOL");
+      snprintf(overlaySub, sizeof(overlaySub), "SELECT OTHER SLOT");
+      overlayActive = true;
+      overlayUntil = millis() + 750;
+      screenDirty = true;
+      return;
+    }
+
+    presetToolTargetActive = false;
+    presetToolConfirmActive = true;
+    presetToolChoiceYes = false;
+    screenDirty = true;
+    return;
+  }
+
+  if (presetToolsMenuActive) {
+    if (presetToolsMenuIndex == 0 || presetToolsMenuIndex == 1) {
+      presetToolAction =
+          (presetToolsMenuIndex == 0) ? PRESET_TOOL_COPY : PRESET_TOOL_MOVE;
+      presetToolTargetIndex = currentPresetIndex();
+      presetToolsMenuActive = false;
+      presetToolTargetActive = true;
+      screenDirty = true;
+      return;
+    }
+
+    if (presetToolsMenuIndex == 2) {
+      presetToolAction = PRESET_TOOL_DELETE;
+      presetToolsMenuActive = false;
+      presetToolConfirmActive = true;
+      presetToolChoiceYes = false;
+      screenDirty = true;
+      return;
+    }
+
+    presetToolsMenuActive = false;
+    systemMenuActive = true;
+    screenDirty = true;
+    return;
+  }
+
   if (saveDialog) {
     if (saveChoiceYes) {
       saveCurrentPreset();
@@ -4548,6 +4782,31 @@ void handleEncoderLongPress() {
     return;
   }
 
+  if (presetToolConfirmActive) {
+    presetToolConfirmActive = false;
+    if (presetToolAction == PRESET_TOOL_DELETE) {
+      presetToolsMenuActive = true;
+    } else {
+      presetToolTargetActive = true;
+    }
+    screenDirty = true;
+    return;
+  }
+
+  if (presetToolTargetActive) {
+    presetToolTargetActive = false;
+    presetToolsMenuActive = true;
+    screenDirty = true;
+    return;
+  }
+
+  if (presetToolsMenuActive) {
+    presetToolsMenuActive = false;
+    systemMenuActive = true;
+    screenDirty = true;
+    return;
+  }
+
   if (saveDialog || maintenanceConfirm || usbFlashConfirm || systemInfoActive) return;
 
   if (systemMenuActive) {
@@ -4678,7 +4937,7 @@ void drawSystemMenu() {
   M5.Display.setTextSize(1);
 
   for (uint8_t i = 0; i < SYSTEM_MENU_COUNT; ++i) {
-    int y = 44 + i * 11;
+    int y = 42 + i * 10;
 
     if (i == systemMenuIndex) {
       M5.Display.fillRect(10, y - 2, w - 20, 11, C_YELLOW);
@@ -4697,6 +4956,117 @@ void drawSystemMenu() {
   M5.Display.setTextColor(C_GREY, C_BLACK);
   M5.Display.setCursor(10, 126);
   M5.Display.print("TURN=SELECT  PUSH=ENTER  HOLD=EXIT");
+}
+
+void drawPresetToolsMenu() {
+  clearScreen();
+  int w = M5.Display.width();
+
+  drawHazardStripe(0, 9);
+  M5.Display.drawRect(5, 14, w - 10, 116, C_AMBER);
+
+  M5.Display.setTextColor(C_YELLOW, C_BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(10, 20);
+  M5.Display.print("PRESET TOOLS");
+
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(C_GREY, C_BLACK);
+  M5.Display.setCursor(12, 43);
+  M5.Display.printf("SOURCE B%u / P%u",
+                    loadedBank + 1, loadedSlot + 1);
+
+  for (uint8_t i = 0; i < PRESET_TOOLS_MENU_COUNT; ++i) {
+    int y = 58 + i * 14;
+    if (i == presetToolsMenuIndex) {
+      M5.Display.fillRect(10, y - 2, w - 20, 12, C_YELLOW);
+      M5.Display.setTextColor(C_BLACK, C_YELLOW);
+      M5.Display.setCursor(15, y);
+      M5.Display.print("> ");
+      M5.Display.print(PRESET_TOOLS_MENU_ITEMS[i]);
+    } else {
+      M5.Display.setTextColor(C_WHITE, C_BLACK);
+      M5.Display.setCursor(15, y);
+      M5.Display.print("  ");
+      M5.Display.print(PRESET_TOOLS_MENU_ITEMS[i]);
+    }
+  }
+
+  M5.Display.setTextColor(C_GREY, C_BLACK);
+  M5.Display.setCursor(10, 126);
+  M5.Display.print("TURN=SELECT  PUSH=ENTER  HOLD=BACK");
+}
+
+void drawPresetTargetSelect() {
+  clearScreen();
+  int w = M5.Display.width();
+
+  Preset target{};
+  loadPresetData(presetToolTargetIndex, target);
+
+  drawHazardStripe(0, 9);
+  M5.Display.drawRect(5, 14, w - 10, 116, C_AMBER);
+
+  M5.Display.setTextColor(C_YELLOW, C_BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(10, 20);
+  M5.Display.printf("%s TARGET", presetToolActionLabel());
+
+  M5.Display.setTextColor(C_GREY, C_BLACK);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(12, 48);
+  M5.Display.printf("SOURCE  B%u / P%u  %.15s",
+                    loadedBank + 1, loadedSlot + 1, currentPreset.name);
+
+  M5.Display.setTextColor(C_WHITE, C_BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(12, 72);
+  M5.Display.printf("B%u / P%u",
+                    (presetToolTargetIndex / PRESETS_PER_BANK) + 1,
+                    (presetToolTargetIndex % PRESETS_PER_BANK) + 1);
+
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(12, 100);
+  M5.Display.printf("%.25s", target.name);
+
+  M5.Display.setTextColor(C_GREY, C_BLACK);
+  M5.Display.setCursor(10, 126);
+  M5.Display.print("TURN=TARGET  PUSH=OK  HOLD=BACK");
+}
+
+void drawPresetToolConfirm() {
+  clearScreen();
+  int w = M5.Display.width();
+
+  drawHazardStripe(0, 10);
+  M5.Display.drawRect(5, 15, w - 10, 110, C_AMBER);
+
+  M5.Display.setTextColor(C_YELLOW, C_BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(12, 25);
+  M5.Display.printf("%s PRESET ?", presetToolActionLabel());
+
+  M5.Display.setTextColor(C_WHITE, C_BLACK);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(12, 58);
+
+  uint8_t index = (presetToolAction == PRESET_TOOL_DELETE)
+                ? currentPresetIndex()
+                : presetToolTargetIndex;
+  M5.Display.printf("B%u / P%u",
+                    (index / PRESETS_PER_BANK) + 1,
+                    (index % PRESETS_PER_BANK) + 1);
+
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(35, 90);
+  if (!presetToolChoiceYes) M5.Display.setTextColor(C_BLACK, C_YELLOW);
+  else                      M5.Display.setTextColor(C_GREY, C_BLACK);
+  M5.Display.print(" NO ");
+
+  M5.Display.setCursor(145, 90);
+  if (presetToolChoiceYes) M5.Display.setTextColor(C_BLACK, C_YELLOW);
+  else                     M5.Display.setTextColor(C_GREY, C_BLACK);
+  M5.Display.print(" YES ");
 }
 
 void drawWifiSetupMenu() {
@@ -5098,7 +5468,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.10");
+  M5.Display.print("FW          : v1.10.11");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -5152,7 +5522,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.10  LATEST ");
+    M5.Display.print("FW v1.10.11  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -5695,6 +6065,12 @@ void drawUiIfNeeded() {
     drawWifiSelect();
   } else if (maintenanceConfirm) {
     drawMaintenanceConfirm();
+  } else if (presetToolConfirmActive) {
+    drawPresetToolConfirm();
+  } else if (presetToolTargetActive) {
+    drawPresetTargetSelect();
+  } else if (presetToolsMenuActive) {
+    drawPresetToolsMenu();
   } else if (saveDialog) {
     drawSaveDialog();
   } else if (systemMenuActive) {
@@ -5814,7 +6190,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.10");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.11");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -5868,7 +6244,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.10
+  Version: v1.10.11
   END
   ======================================================================
 */

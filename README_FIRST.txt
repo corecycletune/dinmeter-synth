@@ -1119,3 +1119,10 @@ v1.10.11 note safety + preset tools
   explicit confirmation before writing.
 - MOVE follows the preset to its new slot. DELETE removes the stored NVS bundle
   and reloads that slot's factory/default (or INIT) state.
+
+
+v1.10.12 portamento default 20
+--------------------------------
+- Changes the default GLD TIME / portamento time from 40 to 20.
+- Existing saved preset values are not overwritten; the new value applies to
+  factory/default/INIT preset generation.

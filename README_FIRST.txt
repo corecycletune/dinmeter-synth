@@ -1099,3 +1099,23 @@ v1.10.10 PERFORMANCE encoder PANIC
 - Encoder long press still opens/closes the SYSTEM MENU.
 - CONFIG-mode short press behavior is unchanged (OSC/ENV/LFO/ROUTE selection,
   VOICE ENV neutral reset, etc.).
+
+
+v1.10.11 note safety + preset tools
+-----------------------------------
+- LEGATO now uses the same silence/rebuild path as MONO and GLIDE when changed
+  during CONFIG. This prevents switching DinMeter's mono-voice ownership while
+  an old SAM2695 voice is still sounding.
+- MONO / GLIDE / LEGATO and PERFORMANCE portamento rebuilds now restore the
+  current pedal state after the safety silence.
+- A late or duplicate NoteOff no longer escalates into a full automatic PANIC.
+  DinMeter releases that pitch best-effort and locally rebuilds the software
+  mono voice only when necessary.
+- Duplicate NoteOn recovery now preserves the other held keys instead of
+  clearing the entire held-note model.
+- SYSTEM MENU adds PRESET TOOLS with COPY CURRENT, MOVE CURRENT and
+  DELETE CURRENT.
+- COPY/MOVE select any B1/P1 .. B9/P8 destination with the encoder and require
+  explicit confirmation before writing.
+- MOVE follows the preset to its new slot. DELETE removes the stored NVS bundle
+  and reloads that slot's factory/default (or INIT) state.

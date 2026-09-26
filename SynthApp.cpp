@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.11
+  Version: v1.10.12
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -36,7 +36,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.11";
+  "DINMETER_FW_VERSION=v1.10.12";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -1505,7 +1505,7 @@ void initModularDefaults(Preset& p) {
 }
 
 void migrateStoredPresetV1910(const StoredPresetV1910& oldPreset, Preset& out) {
-  // Preset keeps the entire v1.10.11 object as a byte-compatible prefix.
+  // Preset keeps the entire v1.10.12 object as a byte-compatible prefix.
   memcpy(&out, &oldPreset, sizeof(oldPreset));
   initModularDefaults(out);
 }
@@ -1534,7 +1534,7 @@ Preset makeInitPreset(uint8_t index) {
   p.vibratoRate = 64;
   p.vibratoDepth = 0;
   p.vibratoDelay = 0;
-  p.glideTime = 40;
+  p.glideTime = 20;
 
   p.mono = 0;
   p.glide = 0;
@@ -1572,7 +1572,7 @@ Preset makeGmQuickPreset(uint8_t slot) {
   p.vibratoRate = 64;
   p.vibratoDepth = 0;
   p.vibratoDelay = 0;
-  p.glideTime = 40;
+  p.glideTime = 20;
   p.mono = 0;
   p.glide = 0;
   p.legato = 1;
@@ -1624,7 +1624,7 @@ Preset makeDefaultPreset(uint8_t index) {
   p.vibratoRate = 64;
   p.vibratoDepth = 0;
   p.vibratoDelay = 0;
-  p.glideTime = 40;
+  p.glideTime = 20;
 
   p.mono = 0;
   p.glide = 0;
@@ -5468,7 +5468,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.11");
+  M5.Display.print("FW          : v1.10.12");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -5522,7 +5522,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.11  LATEST ");
+    M5.Display.print("FW v1.10.12  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -6190,7 +6190,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.11");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.12");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -6244,7 +6244,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.11
+  Version: v1.10.12
   END
   ======================================================================
 */

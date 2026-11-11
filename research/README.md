@@ -9,6 +9,8 @@
 - [基礎資料室の目次・調査の体系](foundations/README.md) — 音声経路、変調経路、ボイス設計、フィルター、エフェクト、音の分析
 - [初回比較｜Minimoog Model D / KORG MS-20 / Prophet-5 / Surge XT](foundations/2026-11-10-classic-synth-architectures.md) — 名機の設計思想、現行DinMeterとの差、近似できることと未確認事項
 
+- [第2回｜AMYの実装コードを精読](foundations/2026-11-11-amy-dsp-architecture.md) — 帯域制限OSC、発音階層、リアルタイム処理の設計原理
+
 基礎資料から**具体的な再利用方法**が見えた段階で`knowledge/`の知識カードに昇格する。
 
 ## 安価な音源・DSP基板の調査（GM音源以外）

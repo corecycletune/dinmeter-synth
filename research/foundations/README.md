@@ -29,6 +29,10 @@
 - [2026-11-10｜3つの名機＋Surge XTから学ぶ基本設計](2026-11-10-classic-synth-architectures.md)  
   Minimoog Model D / KORG MS-20 / Prophet-5 / Surge XT を、音声経路・変調・DinMeterへの応用可能性の軸で比較。
 
+## 第2回：ソース精読で確認したDSP設計
+
+- [2026-11-11｜AMYの帯域制限OSC・osc/voice/synth階層・音声スレッド設計](2026-11-11-amy-dsp-architecture.md) — `oscillators.c`、`filters.c`、`amy.c`の関数を確認。実機検証なし。
+
 ## 根拠になる一次・準一次資料
 
 ### メーカー公式資料

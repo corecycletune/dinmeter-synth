@@ -29,6 +29,10 @@
 - [2026-11-10｜3つの名機＋Surge XTから学ぶ基本設計](2026-11-10-classic-synth-architectures.md)  
   Minimoog Model D / KORG MS-20 / Prophet-5 / Surge XT を、音声経路・変調・DinMeterへの応用可能性の軸で比較。
 
+## 第3回：コーラスと短い可変遅延
+
+- [2026-11-12｜DaisySP実装から学ぶコーラスとJUNO系音作り](2026-11-12-chorus-modulated-delay.md) — 音声後段の短い可変遅延、LFO/フィードバック、ステレオ処理、DinMeter内蔵FXとの差。ヘッダの遅延範囲と実装の不一致も記録。
+
 ## 第2回：ソース精読で確認したDSP設計
 
 - [2026-11-11｜AMYの帯域制限OSC・osc/voice/synth階層・音声スレッド設計](2026-11-11-amy-dsp-architecture.md) — `oscillators.c`、`filters.c`、`amy.c`の関数を確認。実機検証なし。

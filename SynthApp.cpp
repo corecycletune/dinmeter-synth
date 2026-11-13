@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.15
+  Version: v1.10.16
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -36,7 +36,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.15";
+  "DINMETER_FW_VERSION=v1.10.16";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -340,6 +340,9 @@ uint8_t modVelocity = 0;
 uint8_t modKey = 0;
 uint8_t modWheel = 0;
 uint8_t modAftertouch = 0;
+// Coalesce rapidly arriving MIDI CC1/channel aftertouch changes for the
+// existing ~31 Hz modulation output cadence, without blocking MIDI input.
+bool midiModControllersDirty = false;
 
 bool oscEnabled(uint8_t osc) {
   if (osc >= 3) return false;
@@ -1288,6 +1291,17 @@ bool hasDynamicRouteForDestination(uint8_t destination) {
   return false;
 }
 
+bool hasMidiControllerRouteForDestination(uint8_t destination) {
+  for (uint8_t i = 0; i < MOD_ROUTE_COUNT; ++i) {
+    const ModRoute& route = currentPreset.routes[i];
+    if (!route.enabled || route.destination != destination || route.amount == 0)
+      continue;
+    if (route.source == MODSRC_MODWHEEL || route.source == MODSRC_AFTERTOUCH)
+      return true;
+  }
+  return false;
+}
+
 // Implemented below, after Pitch Bend helpers are defined.
 void sendCurrentPitchModulation();
 
@@ -1301,13 +1315,18 @@ void updateModulationEngine() {
     updateLfoRuntime(i, nowMs);
   }
 
-  const bool cutoffActive = hasDynamicRouteForDestination(MODDST_CUTOFF);
-  const bool pitchActive  = hasDynamicRouteForDestination(MODDST_PITCH);
-  const bool ampActive    = hasDynamicRouteForDestination(MODDST_AMP);
+  const bool controllerChanged = midiModControllersDirty;
+  const bool cutoffActive = hasDynamicRouteForDestination(MODDST_CUTOFF) ||
+      (controllerChanged && hasMidiControllerRouteForDestination(MODDST_CUTOFF));
+  const bool pitchActive = hasDynamicRouteForDestination(MODDST_PITCH) ||
+      (controllerChanged && hasMidiControllerRouteForDestination(MODDST_PITCH));
+  const bool ampActive = hasDynamicRouteForDestination(MODDST_AMP) ||
+      (controllerChanged && hasMidiControllerRouteForDestination(MODDST_AMP));
 
-  if (!cutoffActive && !pitchActive && !ampActive) return;
+  if (!cutoffActive && !pitchActive && !ampActive && !controllerChanged) return;
   if (nowMs - lastModOutputAt < MOD_OUTPUT_INTERVAL_MS) return;
   lastModOutputAt = nowMs;
+  midiModControllersDirty = false;
 
   if (cutoffActive) {
     // Only active oscillator layers need continuous GS filter updates.
@@ -2515,6 +2534,11 @@ void startConfigAuditionNote(uint32_t nowMs) {
   configAuditionNote =
       CONFIG_AUDITION_NOTES[configAuditionStep % CONFIG_AUDITION_NOTE_COUNT];
 
+  // Audition's own generated notes must feed the same VEL/KEY modulation
+  // sources as external MIDI notes, before zero-attack envelope refresh.
+  modVelocity = CONFIG_AUDITION_VELOCITY;
+  modKey = configAuditionNote;
+
   // Treat every generated note as a fresh phrase for envelope auditioning.
   // LFO modules with RTR off keep their phase; RTR on restarts as expected.
   triggerModEnvelopes(true);
@@ -2712,10 +2736,11 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
       return;
     }
 
-    // The modular router also reads CC1 as an independent source.
-    if (cc == 1) {
+    // Defer modular CC1 modulation to the existing ~31 Hz MIDI output loop.
+    // Native SAM2695 CC1 forwarding below remains immediate.
+    if (cc == 1 && modWheel != value) {
       modWheel = value;
-      refreshModulationOutputs(false);
+      midiModControllersDirty = true;
     }
 
     // Mod wheel, expression, etc.
@@ -2727,8 +2752,11 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
   if (cin == 0xC) return;
 
   if (cin == 0xD) {
-    modAftertouch = packet[2] & 0x7F;
-    refreshModulationOutputs(false);
+    uint8_t aftertouch = packet[2] & 0x7F;
+    if (modAftertouch != aftertouch) {
+      modAftertouch = aftertouch;
+      midiModControllersDirty = true;
+    }
     for (uint8_t i = 0; i < 3; ++i) {
       if (oscEnabled(i)) sendMidi2(0xD0 | OSC_CH[i], packet[2] & 0x7F);
     }
@@ -4569,6 +4597,15 @@ void handleEncoderRotate(int detents) {
   while (b >= BANK_COUNT) b -= BANK_COUNT;
   if ((uint8_t)b != browseBank) {
     browseBank = (uint8_t)b;
+    if (browseBank == loadedBank) {
+      // Returning to the sounding bank cancels browsing. Do NOT reload
+      // slot 7: preserve the current slot and any unsaved sound edits.
+      bankSelectionPending = false;
+      overlayActive = false;
+      updateByteLeds();
+      screenDirty = true;
+      return;
+    }
     bankSelectionPending = true;
     bankSelectionChangedAt = millis();
     updateByteLeds();
@@ -5658,7 +5695,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.15");
+  M5.Display.print("FW          : v1.10.16");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -5712,7 +5749,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.15  LATEST ");
+    M5.Display.print("FW v1.10.16  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -5986,7 +6023,9 @@ void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
   if (page == PAGE_EQ) {
     if (knob < 4) {
       const int db = ((int)currentFxEq.eqGain[knob] * 24 + 63) / 127 - 12;
-      snprintf(out, n, "%+ddB", db);
+      // 8Angle cells are 29 px wide on DinMeter's 240 px screen.
+      // Show the signed gain without the dB suffix to prevent overlap.
+      snprintf(out, n, "%+d", db);
     } else {
       snprintf(out, n, "%u", currentFxEq.eqFreq[knob - 4]);
     }
@@ -6409,7 +6448,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.15");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.16");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -6464,7 +6503,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.15
+  Version: v1.10.16
   END
   ======================================================================
 */

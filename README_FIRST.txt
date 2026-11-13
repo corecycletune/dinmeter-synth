@@ -1202,3 +1202,23 @@ Build dependency updates: review gate (2026-11-13)
   m5stack:esp32@3.2.5. This guard does not silently update that core.
 - A changed library MAY be compatible. Failure is an approval gate, NOT an
   assertion that the new upstream version is broken.
+
+v1.10.16 reviewed fixes (no new sound-design features)
+-----------------------------------------------------
+- PERFORMANCE bank browse: if the orange encoder returns to the currently
+  loaded bank before its 500 ms settle, preview is cancelled immediately.
+  The original selected slot and unsaved preset edits remain untouched.
+  Settling on any OTHER bank still auto-loads its physical leftmost preset.
+- Incoming CC1 and channel aftertouch update the modular controller snapshots
+  immediately, but MIDI modulation outputs are coalesced to the existing
+  32 ms cadence. The source/destination routing limits output to affected
+  active CUT, PIT or AMP destinations. Native CC1/aftertouch MIDI forwarding
+  is unchanged. No new MIDI event playback or note ownership rules added.
+- CONFIG TST generated notes now set their VEL and KEY snapshots before
+  triggering MOD ENV, so VEL/KEY modulation can be heard when auditioning.
+- CONFIG EQ gain values are rendered as signed -12..+12 without a dB suffix
+  to fit the 29 px cells on a 240x135 screen.
+- CI independently checks upstream dependencies against their last reviewed
+  versions/commits; upstream updates are not silently approved.
+- The firmware is source+CI validated only; real hardware display, sound and
+  MIDI behavior must still be checked before declaring fully verified.

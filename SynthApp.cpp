@@ -2926,6 +2926,10 @@ uint8_t currentParamAs127(uint8_t knob) {
       case 2: return currentPreset.reverb;
       case 3: return currentPreset.vibratoRate;
       case 4: return currentPreset.vibratoDepth;
+      case 5: return currentFxEq.fxProgram == 2 ? 0
+                   : (currentFxEq.fxProgram == 6 ? 64 : 127);
+      case 6: return currentFxEq.fxTime;
+      case 7: return currentFxEq.fxFeedback;
       default: return 0;
     }
   }
@@ -2993,8 +2997,8 @@ uint8_t currentParamAs127(uint8_t knob) {
     const ModRoute& route = currentPreset.routes[selectedRoute];
     switch (knob) {
       case 0: {
-        uint8_t src = (route.source <= MODSRC_LFO3) ? route.source : (uint8_t)MODSRC_NONE;
-        return (uint8_t)(((uint16_t)src * 127) / MODSRC_LFO3);
+        uint8_t src = (route.source <= MODSRC_AFTERTOUCH) ? route.source : (uint8_t)MODSRC_NONE;
+        return (uint8_t)(((uint16_t)src * 127) / MODSRC_AFTERTOUCH);
       }
       case 1: {
         uint8_t dst = route.destination <= MODDST_AMP
@@ -3021,13 +3025,18 @@ uint8_t currentParamAs127(uint8_t knob) {
     }
   }
 
+  if (page == PAGE_EQ) {
+    return knob < 4 ? currentFxEq.eqGain[knob]
+                    : currentFxEq.eqFreq[knob - 4];
+  }
+
   return 0;
 }
 
 bool knobIsReserved(uint8_t knob) {
   uint8_t page = configMode ? configPage : (uint8_t)PAGE_PERF;
 
-  if (page == PAGE_FILTER_ENV) return knob >= 5;
+  if (page == PAGE_FILTER_ENV) return false;
   if (page == PAGE_VOICE_ENV) return knob >= 3;
   if (page == PAGE_OSC) return false;
   if (page == PAGE_GM) return knob >= 4;
@@ -3290,6 +3299,26 @@ void applyFilterPageKnob(uint8_t knob, uint8_t v) {
       if (changed) applyVibratoAll();
       break;
 
+    case 5: {
+      const uint8_t fx = v < 43 ? 2 : (v < 86 ? 6 : 7);
+      changed = currentFxEq.fxProgram != fx;
+      currentFxEq.fxProgram = fx;
+      if (changed) applyReverbAll();
+      break;
+    }
+
+    case 6:
+      changed = currentFxEq.fxTime != v;
+      currentFxEq.fxTime = v;
+      if (changed && currentFxEq.fxProgram != 2) applyReverbAll();
+      break;
+
+    case 7:
+      changed = currentFxEq.fxFeedback != v;
+      currentFxEq.fxFeedback = v;
+      if (changed && currentFxEq.fxProgram != 2) applyReverbAll();
+      break;
+
     default:
       return;
   }
@@ -3500,6 +3529,17 @@ void applyModPageKnob(uint8_t knob, uint8_t v) {
   if (changed) markModified();
 }
 
+void applyEqPageKnob(uint8_t knob, uint8_t v) {
+  uint8_t* param = knob < 4
+      ? &currentFxEq.eqGain[knob]
+      : &currentFxEq.eqFreq[knob - 4];
+  if (*param == v) return;
+
+  *param = v;
+  sendNRPN(OSC_CH[0], 0x37, knob < 4 ? knob : (uint8_t)(knob + 4), v);
+  markModified();
+}
+
 void applyEnvPageKnob(uint8_t knob, uint8_t v) {
   EnvelopeState& env = currentPreset.env[selectedEnv];
   bool changed = false;
@@ -3577,8 +3617,8 @@ void applyRoutePageKnob(uint8_t knob, uint8_t v) {
 
   switch (knob) {
     case 0: {
-      uint8_t source = (uint8_t)(((uint16_t)v * 7) / 128);
-      if (source > MODSRC_LFO3) source = MODSRC_LFO3;
+      uint8_t source = (uint8_t)(((uint16_t)v * (MODSRC_AFTERTOUCH + 1)) / 128);
+      if (source > MODSRC_AFTERTOUCH) source = MODSRC_AFTERTOUCH;
       changed = route.source != source;
       route.source = source;
       break;
@@ -3637,6 +3677,8 @@ void applyKnobValue(uint8_t knob, uint8_t value) {
     applyRoutePageKnob(knob, value);
   } else if (page == PAGE_MOD) {
     applyModPageKnob(knob, value);
+  } else if (page == PAGE_EQ) {
+    applyEqPageKnob(knob, value);
   }
 
   screenDirty = true;
@@ -5877,6 +5919,7 @@ const char** labelsForPage(uint8_t page) {
   if (page == PAGE_ENV) return ENV_LABELS;
   if (page == PAGE_LFO) return LFO_LABELS;
   if (page == PAGE_ROUTE) return ROUTE_LABELS;
+  if (page == PAGE_EQ) return EQ_LABELS;
   return MOD_LABELS;
 }
 
@@ -5894,6 +5937,10 @@ const char* routeSourceLabel(uint8_t source) {
     case MODSRC_LFO1: return "L1";
     case MODSRC_LFO2: return "L2";
     case MODSRC_LFO3: return "L3";
+    case MODSRC_VELOCITY: return "VEL";
+    case MODSRC_KEY: return "KEY";
+    case MODSRC_MODWHEEL: return "MW";
+    case MODSRC_AFTERTOUCH: return "AT";
     default: return "---";
   }
 }
@@ -5920,9 +5967,29 @@ const char* lfoWaveLabel(uint8_t waveform) {
 }
 
 void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
-  if (page == PAGE_PERF || page == PAGE_FILTER_ENV ||
-      page == PAGE_VOICE_ENV || page == PAGE_MOD) {
+  if (page == PAGE_PERF || page == PAGE_VOICE_ENV || page == PAGE_MOD) {
     snprintf(out, n, "%u", currentParamAs127(knob));
+    return;
+  }
+
+  if (page == PAGE_FILTER_ENV) {
+    if (knob == 5) {
+      const char* fx = currentFxEq.fxProgram == 6 ? "DEL"
+                     : currentFxEq.fxProgram == 7 ? "PAN" : "REV";
+      snprintf(out, n, "%s", fx);
+    } else {
+      snprintf(out, n, "%u", currentParamAs127(knob));
+    }
+    return;
+  }
+
+  if (page == PAGE_EQ) {
+    if (knob < 4) {
+      const int db = ((int)currentFxEq.eqGain[knob] * 24 + 63) / 127 - 12;
+      snprintf(out, n, "%+ddB", db);
+    } else {
+      snprintf(out, n, "%u", currentFxEq.eqFreq[knob - 4]);
+    }
     return;
   }
 

@@ -337,6 +337,11 @@ uint8_t loadedBank  = 0;  // actually sounding bank
 uint8_t loadedSlot  = 0;  // 0..7
 bool modified       = false;
 
+// Keep the bank overlay responsive while skipping intermediate preset loads.
+static constexpr uint32_t BANK_SETTLE_MS = 500;
+bool bankSelectionPending = false;
+uint32_t bankSelectionChangedAt = 0;
+
 uint8_t masterVolume = 100;
 
 // Runtime-only states
@@ -820,13 +825,14 @@ void sendGsPartParameter(uint8_t ch, uint8_t addressBlock, uint8_t parameter, ui
   // SAM2695 GS DT1 style message. GS addresses use PART number, not MIDI
   // channel number, so translate the default channel->part mapping first.
   const uint8_t part = gsPartForMidiChannel(ch);
+  const uint8_t partAddress = (uint8_t)(addressBlock | (part & 0x0F));
+  const uint8_t data = value & 0x7F;
+  // GS DT1 checksum covers three address bytes and all data bytes.
+  const uint8_t checksum =
+      (uint8_t)((128 - ((0x40 + partAddress + parameter + data) & 0x7F)) & 0x7F);
   const uint8_t msg[11] = {
     0xF0, 0x41, 0x00, 0x42, 0x12, 0x40,
-    (uint8_t)(addressBlock | (part & 0x0F)),
-    parameter,
-    (uint8_t)(value & 0x7F),
-    0x00,
-    0xF7
+    partAddress, parameter, data, checksum, 0xF7
   };
   SynthSerial.write(msg, sizeof(msg));
 }
@@ -2668,6 +2674,7 @@ void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n);
 void loadPreset(uint8_t bank, uint8_t slot) {
   if (bank >= BANK_COUNT || slot >= PRESETS_PER_BANK) return;
 
+  bankSelectionPending = false;
   loadedBank = bank;
   loadedSlot = slot;
   browseBank = bank;
@@ -3530,6 +3537,12 @@ bool lastConfigRaw = false;
 void handleConfigModeChange(bool newMode) {
   if (newMode == configMode) return;
 
+  // If the player opens CONFIG during a pending bank selection, finish
+  // selecting the visible bank first rather than editing the prior sound.
+  if (newMode && bankSelectionPending) {
+    loadPreset(browseBank, PRESETS_PER_BANK - 1);
+  }
+
   if (!newMode) {
     setConfigAuditionEnabled(false);
   }
@@ -4386,7 +4399,11 @@ void handleEncoderRotate(int detents) {
       configPage = (uint8_t)p;
       armPickupForCurrentContext();
       updateByteLeds();
-      showPageOverlay();
+      // Tabs are already drawn in drawConfigScreen(). Avoid the full-screen
+      // PAGE CHANGE overlay, so the player's eyes remain on the controls.
+      overlayActive = false;
+      paramPopupActive = false;
+      screenDirty = true;
     }
     return;
   }
@@ -4396,14 +4413,29 @@ void handleEncoderRotate(int detents) {
   while (b >= BANK_COUNT) b -= BANK_COUNT;
   if ((uint8_t)b != browseBank) {
     browseBank = (uint8_t)b;
+    bankSelectionPending = true;
+    bankSelectionChangedAt = millis();
     updateByteLeds();
 
     snprintf(overlayTitle, sizeof(overlayTitle), "BANK SELECT");
     snprintf(overlaySub, sizeof(overlaySub), "%s", BANK_GROUP_NAMES[browseBank]);
     overlayActive = true;
-    overlayUntil = millis() + 1200;
+    overlayUntil = bankSelectionChangedAt + BANK_SETTLE_MS + 60;
     screenDirty = true;
   }
+}
+
+void commitBankSelectionIfIdle() {
+  if (!bankSelectionPending ||
+      (uint32_t)(millis() - bankSelectionChangedAt) < BANK_SETTLE_MS) return;
+
+  // Physical leftmost ByteButton maps to logical slot 7 in this firmware.
+  loadPreset(browseBank, PRESETS_PER_BANK - 1);
+  armPickupForCurrentContext();
+  updateByteLeds();
+  paramPopupActive = false;
+  overlayActive = false;  // land on PERFORMANCE as the new sound is loaded
+  screenDirty = true;
 }
 
 void openSaveDialog() {
@@ -6240,6 +6272,7 @@ void synthAppLoop() {
   }
 
   pollEncoderButton();
+  commitBankSelectionIfIdle();
   drawUiIfNeeded();
 }
 

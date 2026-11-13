@@ -1182,3 +1182,23 @@ v1.10.15 screen orientation and reproducible build
   compile does NOT replace hardware verification of the 240x135 display.
 - No sound/preset/button behavior was altered relative to the intended
   v1.10.14 feature set. Hardware audio/UI testing remains required.
+
+
+Build dependency updates: review gate (2026-11-13)
+-------------------------------------------------
+- Arduino CLI installs the latest available M5Unified/M5GFX libraries, rather
+  than forcing an older version. The build immediately compares actual
+  installed versions with a reviewed, known-working baseline in
+  .github/workflows/build-firmware.yml. GitHub-cloned M5Unit-8Angle,
+  M5Unit-ByteButton, M5-SAM2695 and USB Host MIDI sources are checked by SHA.
+- Any upstream version/SHA change FAILS the workflow BEFORE the firmware
+  compile/artifact/release stage. This is intentional: a successful compile
+  alone cannot verify hardware UI or MIDI compatibility.
+- To approve an upstream update, first read upstream release notes and the
+  actual source diff, identify API/rotation/size/timing behavior changes,
+  run targeted tests, arrange physical DinMeter display+audio checks, and
+  update the reviewed baseline within an explicitly reviewed PR.
+- M5Stack esp32 board package remains at the separately reviewed
+  m5stack:esp32@3.2.5. This guard does not silently update that core.
+- A changed library MAY be compatible. Failure is an approval gate, NOT an
+  assertion that the new upstream version is broken.

@@ -314,12 +314,32 @@ struct __attribute__((packed)) OscLayerState {
   uint8_t enabledMask; // bits 0..2 = OSC1..3
 };
 
+// FX mode shares SAM2695's reverb engine: Room 3, Delay or Pan Delay.
+// EQ is a GLOBAL four-band SAM2695 effect, despite preset-scoped storage.
+struct __attribute__((packed)) FxEqState {
+  uint8_t version;
+  uint8_t fxProgram; // 2=Room3, 6=Delay, 7=Pan Delay
+  uint8_t fxTime;
+  uint8_t fxFeedback;
+  uint8_t eqGain[4]; // bass, low-mid, high-mid, treble
+  uint8_t eqFreq[4];
+};
+
 static constexpr uint8_t GM_LAYER_VERSION = 1;
 static constexpr uint8_t OSC_LAYER_VERSION = 1;
+static constexpr uint8_t FX_EQ_VERSION = 1;
 
 Preset currentPreset;
 GmLayerState currentGmLayer = {GM_LAYER_VERSION, 0, 0, 0, 64};
 OscLayerState currentOscLayer = {OSC_LAYER_VERSION, 0x07};
+FxEqState currentFxEq = {FX_EQ_VERSION, 2, 64, 0,
+                         {96, 64, 64, 96}, {12, 27, 114, 64}};
+
+// Sources are performance-wide snapshots, not per-voice modulation.
+uint8_t modVelocity = 0;
+uint8_t modKey = 0;
+uint8_t modWheel = 0;
+uint8_t modAftertouch = 0;
 
 bool oscEnabled(uint8_t osc) {
   if (osc >= 3) return false;
@@ -443,6 +463,7 @@ enum ConfigPage : uint8_t {
   PAGE_LFO,
   PAGE_ROUTE,
   PAGE_MOD,
+  PAGE_EQ,
   PAGE_COUNT
 };
 
@@ -455,11 +476,11 @@ uint8_t selectedRoute = 0;
 
 static const char* PAGE_NAMES[PAGE_COUNT] = {
   "PERFORMANCE", "TONE / FX", "VOICE ENV", "OSC",
-  "GM LAYER", "MOD ENV", "LFO", "ROUTE", "MOD"
+  "GM LAYER", "MOD ENV", "LFO", "ROUTE", "MOD", "MASTER EQ"
 };
 
 static const char* PAGE_TAB[PAGE_COUNT] = {
-  "PF", "TN", "VE", "OS", "GM", "EN", "LF", "RT", "MD"
+  "PF", "TN", "VE", "OS", "GM", "EN", "LF", "RT", "MD", "EQ"
 };
 
 static const char* PERF_LABELS[8] = {
@@ -467,7 +488,7 @@ static const char* PERF_LABELS[8] = {
 };
 
 static const char* FILTER_LABELS[8] = {
-  "CUT", "RES", "REV", "VR", "VD", "---", "---", "---"
+  "CUT", "RES", "REV", "VR", "VD", "FX", "TIM", "FDB"
 };
 
 static const char* VOICE_ENV_LABELS[8] = {
@@ -496,6 +517,10 @@ static const char* ROUTE_LABELS[8] = {
 
 static const char* MOD_LABELS[8] = {
   "MWP", "MWF", "MWA", "RATE", "PDP", "FDP", "ADP", "VDL"
+};
+
+static const char* EQ_LABELS[8] = {
+  "LO", "LM", "HM", "HI", "LF", "MF", "HF", "TF"
 };
 
 static const char* CONFIG_BUTTON_LABELS[8] = {
@@ -867,6 +892,18 @@ void configureLiveCutoffController(uint8_t ch) {
   sendCC(ch, LIVE_FILTER_CC2, 127);
 }
 
+// Global GS parameters use address 40 01 xx (reverb/delay engine).
+void sendGsGlobalParameter(uint8_t address, uint8_t value) {
+  const uint8_t data = value & 0x7F;
+  const uint8_t checksum =
+      (uint8_t)((128 - ((0x40 + 0x01 + address + data) & 0x7F)) & 0x7F);
+  const uint8_t msg[11] = {
+    0xF0, 0x41, 0x00, 0x42, 0x12, 0x40,
+    0x01, address, data, checksum, 0xF7
+  };
+  SynthSerial.write(msg, sizeof(msg));
+}
+
 int modulationSourceValue(uint8_t source) {
   switch (source) {
     case MODSRC_ENV1:
@@ -885,7 +922,12 @@ int modulationSourceValue(uint8_t source) {
       return constrain((int)(lfoRuntime[i].value * 127.0f), -127, 127);
     }
 
-    // Velocity / key / controllers remain reserved for later stages.
+    // Performance-wide MIDI snapshots. These do NOT imply per-note velocity
+    // modulation on a polyphonic SAM2695 voice.
+    case MODSRC_VELOCITY: return modVelocity;
+    case MODSRC_KEY: return modKey;
+    case MODSRC_MODWHEEL: return modWheel;
+    case MODSRC_AFTERTOUCH: return modAftertouch;
     default:
       return 0;
   }
@@ -1662,6 +1704,42 @@ void oscLayerKey(uint8_t index, char* out, size_t outSize) {
   snprintf(out, outSize, "o%02u", index);
 }
 
+void fxEqKey(uint8_t index, char* out, size_t outSize) {
+  snprintf(out, outSize, "f%02u", index);
+}
+
+FxEqState defaultFxEqState() {
+  // Preserve SAM2695 power-up EQ character (+6 dB low/high), and legacy
+  // Room3 reverb selection until the user explicitly edits a preset.
+  return {FX_EQ_VERSION, 2, 64, 0,
+          {96, 64, 64, 96}, {12, 27, 114, 64}};
+}
+
+void loadFxEqData(uint8_t index, FxEqState& out) {
+  out = defaultFxEqState();
+  char key[8];
+  fxEqKey(index, key, sizeof(key));
+  if (prefs.getBytesLength(key) != sizeof(FxEqState)) return;
+  FxEqState stored{};
+  prefs.getBytes(key, &stored, sizeof(stored));
+  if (stored.version != FX_EQ_VERSION) return;
+  if (stored.fxProgram != 2 && stored.fxProgram != 6 && stored.fxProgram != 7)
+    stored.fxProgram = 2;
+  stored.fxTime &= 0x7F;
+  stored.fxFeedback &= 0x7F;
+  for (uint8_t i = 0; i < 4; ++i) {
+    stored.eqGain[i] &= 0x7F;
+    stored.eqFreq[i] &= 0x7F;
+  }
+  out = stored;
+}
+
+void saveFxEqData(uint8_t index, const FxEqState& state) {
+  char key[8];
+  fxEqKey(index, key, sizeof(key));
+  prefs.putBytes(key, &state, sizeof(state));
+}
+
 OscLayerState defaultOscLayer(const Preset& preset) {
   OscLayerState state = {OSC_LAYER_VERSION, 0};
 
@@ -1772,7 +1850,8 @@ void loadPresetData(uint8_t index, Preset& out) {
 void savePresetBundle(uint8_t index,
                       const Preset& preset,
                       const GmLayerState& gmLayer,
-                      const OscLayerState& oscLayer) {
+                      const OscLayerState& oscLayer,
+                      const FxEqState& fxEq) {
   if (index >= PRESET_COUNT) return;
 
   char key[8];
@@ -1780,6 +1859,7 @@ void savePresetBundle(uint8_t index,
   prefs.putBytes(key, &preset, sizeof(Preset));
   saveGmLayerData(index, gmLayer);
   saveOscLayerData(index, oscLayer);
+  saveFxEqData(index, fxEq);
 }
 
 void deletePresetBundle(uint8_t index) {
@@ -1795,10 +1875,13 @@ void deletePresetBundle(uint8_t index) {
 
   oscLayerKey(index, key, sizeof(key));
   prefs.remove(key);
+
+  fxEqKey(index, key, sizeof(key));
+  prefs.remove(key);
 }
 
 void saveCurrentPreset() {
-  savePresetBundle(currentPresetIndex(), currentPreset, currentGmLayer, currentOscLayer);
+  savePresetBundle(currentPresetIndex(), currentPreset, currentGmLayer, currentOscLayer, currentFxEq);
   modified = false;
   screenDirty = true;
 }
@@ -1830,9 +1913,28 @@ void applyEnvelopeAll() {
 }
 
 void applyReverbAll() {
-  uint8_t level = currentPreset.reverbEnabled ? currentPreset.reverb : 0;
+  // SAM2695 shares one global reverb/delay algorithm; DEL/PAN replace Room3,
+  // they are NOT parallel, independently mixable effects.
+  const uint8_t program = currentFxEq.fxProgram;
+  sendGsGlobalParameter(0x30, program); // GS Reverb Type
+  if (program == 6 || program == 7) {
+    sendGsGlobalParameter(0x34, currentFxEq.fxTime);
+    sendGsGlobalParameter(0x35, currentFxEq.fxFeedback);
+  }
+
+  const uint8_t level =
+      currentPreset.reverbEnabled ? currentPreset.reverb : 0;
   for (uint8_t i = 0; i < 3; ++i) {
-    synth.setReverb(OSC_CH[i], 2, level, 0);
+    synth.setReverb(OSC_CH[i], program, level, 0);
+  }
+}
+
+void applyEqAll() {
+  // NRPN 37 00..03 = 4 band levels, 37 08..0B = cutoff frequencies.
+  // EQ is a shared output effect, not one EQ instance per oscillator.
+  for (uint8_t i = 0; i < 4; ++i) {
+    sendNRPN(OSC_CH[0], 0x37, i, currentFxEq.eqGain[i]);
+    sendNRPN(OSC_CH[0], 0x37, (uint8_t)(i + 8), currentFxEq.eqFreq[i]);
   }
 }
 
@@ -2201,6 +2303,7 @@ void applyCurrentPresetToSynth(bool rebuildNotes = true) {
   applyFilterAll();
   applyEnvelopeAll();
   applyReverbAll();
+  applyEqAll();
   applyVibratoAll();
   applyModAll();
   applyModeAndGlideAll();
@@ -2262,6 +2365,8 @@ void handleNoteOn(uint8_t note, uint8_t velocity) {
   heldInput[note] = true;
   heldVelocity[note] = velocity;
   pushNoteOrder(note);
+  modVelocity = velocity;
+  modKey = note;
 
   const bool phraseStart = (heldCount == 1);
   triggerModEnvelopes(phraseStart);
@@ -2607,6 +2712,12 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
       return;
     }
 
+    // The modular router also reads CC1 as an independent source.
+    if (cc == 1) {
+      modWheel = value;
+      refreshModulationOutputs(false);
+    }
+
     // Mod wheel, expression, etc.
     forwardCCToOscs(cc, value);
     return;
@@ -2616,6 +2727,8 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
   if (cin == 0xC) return;
 
   if (cin == 0xD) {
+    modAftertouch = packet[2] & 0x7F;
+    refreshModulationOutputs(false);
     for (uint8_t i = 0; i < 3; ++i) {
       if (oscEnabled(i)) sendMidi2(0xD0 | OSC_CH[i], packet[2] & 0x7F);
     }
@@ -2682,6 +2795,7 @@ void loadPreset(uint8_t bank, uint8_t slot) {
   loadPresetData(currentPresetIndex(), currentPreset);
   loadGmLayerData(currentPresetIndex(), currentGmLayer);
   loadOscLayerData(currentPresetIndex(), currentPreset, currentOscLayer);
+  loadFxEqData(currentPresetIndex(), currentFxEq);
 
   // PERFORMANCE physical Portamento knob is authoritative.
   if (!configMode) {
@@ -2744,7 +2858,7 @@ void executePresetTool() {
     return;
   }
 
-  savePresetBundle(targetIndex, currentPreset, currentGmLayer, currentOscLayer);
+  savePresetBundle(targetIndex, currentPreset, currentGmLayer, currentOscLayer, currentFxEq);
 
   if (presetToolAction == PRESET_TOOL_MOVE) {
     deletePresetBundle(sourceIndex);
@@ -6190,6 +6304,7 @@ void synthAppSetup() {
   loadPresetData(currentPresetIndex(), currentPreset);
   loadGmLayerData(currentPresetIndex(), currentGmLayer);
   loadOscLayerData(currentPresetIndex(), currentPreset, currentOscLayer);
+  loadFxEqData(currentPresetIndex(), currentFxEq);
 
   // Current physical volume is authoritative at boot.
   uint16_t volRaw = angle8.getAnalogInput(0, _12bit);

@@ -1139,3 +1139,46 @@ v1.10.13 single-owner MONO + LFO rate
 - LFO RATE changes from exponential mapping to a cubic 0.05..8 Hz curve.
   This spreads the useful 1..8 Hz range across much more knob travel.
 - LFO RATE is displayed as actual Hz instead of the raw 0..127 value.
+
+v1.10.15 PERFORMANCE bank preview, CONFIG workflow, sound tools
+---------------------------------------------------------------
+- PERFORMANCE encoder now previews BANK numbers immediately and, after
+  500 ms without another detent, loads that bank's physical LEFTMOST
+  ByteButton preset (logical slot 7). Intermediate bank sounds are skipped.
+  The 500 ms settle and the BANK SELECT overlay exit happen together.
+  Pressing a preset button during preview loads that slot immediately.
+- CONFIG encoder page rotation now renders the target parameter page
+  immediately; no PAGE CHANGE full-screen overlay.
+- GS part and global DT1 messages now use the calculated Roland GS
+  checksum instead of a hardcoded 00h; TVF behavior requires real-device
+  audition because previous SAM2695 firmware behavior is not verified.
+- TONE/FX adds FX [REV=Room3 / DEL=Delay / PAN=Pan Delay], TIM and FDB.
+  These select SAM2695's SHARED global reverb/delay engine, not a second
+  independent delay processor. REV amount (knob 3) controls effect send.
+  TIM and FDB have an audible effect only in Delay/Pan Delay mode;
+  the exact time scaling is hardware-dependent.
+- Adds CONFIG EQ tab: LO/LM/HM/HI gains (0..127 mapped -12..+12 dB)
+  and LF/MF/HF/TF band frequencies. This is SAM2695's GLOBAL 4-band EQ.
+- FX/EQ settings are saved per preset in a versioned fXX NVS sidecar.
+  They are included in copy/move/delete. Old preset binary layouts remain
+  untouched. Defaults follow SAM2695 legacy Room3 and power-up EQ values.
+- ROUTE sources now include VEL, KEY, MW(CC1), AT(channel aftertouch),
+  in addition to ENV1..3 and LFO1..3. These are performance-wide snapshot
+  controls, NOT independent per-voice modulation on polyphonic chords.
+- Existing VOICE ENV, MOD ENV, LFO, 3 OSC, GM layer and saved patches
+  are preserved; no factory sound design was replaced.
+- Hardware audition needed: filter cutoff SysEx, FX delay timing/feedback,
+  EQ band response, route source dynamics, combined-MIDI load.
+
+v1.10.15 screen orientation and reproducible build
+--------------------------------------------------
+- This version supersedes the withdrawn v1.10.14 attempt; v1.10.14 must NOT
+  be flashed because the display was rotated into portrait orientation.
+- Fix DinMeter landscape rotation: setRotation(0) with M5GFX/M5Unified 0.3.0.
+  In M5GFX 0.2.x the equivalent orientation used setRotation(1).
+- Pin M5Unified 0.3.0 and M5GFX 0.3.0 explicitly in GitHub Actions.
+  Library version drift caused the previous break without source changes.
+- CI checks expected rotation in source before building. A successful CI
+  compile does NOT replace hardware verification of the 240x135 display.
+- No sound/preset/button behavior was altered relative to the intended
+  v1.10.14 feature set. Hardware audio/UI testing remains required.

@@ -43,7 +43,10 @@ jobs:
       - name: Install Arduino libraries
         run: |
           arduino-cli lib update-index
-          arduino-cli lib install "M5Unified"
+          # M5GFX 0.3.0 changed DinMeter setRotation() semantics:
+          # M5Unified/M5GFX MUST stay in lockstep with SynthApp.cpp.
+          arduino-cli lib install "M5GFX@0.3.0"
+          arduino-cli lib install "M5Unified@0.3.0"
 
           mkdir -p "$HOME/Arduino/libraries"
           git clone --depth 1 https://github.com/m5stack/M5Unit-8Angle.git "$HOME/Arduino/libraries/M5Unit-8Angle"
@@ -70,6 +73,13 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Firmware version: $VERSION"
+
+      - name: Verify DinMeter landscape rotation and library lock
+        run: |
+          grep -Fq 'M5.Display.setRotation(0);' SynthApp.cpp
+          ! grep -Fq 'M5.Display.setRotation(1);' SynthApp.cpp
+          grep -Fq 'arduino-cli lib install "M5GFX@0.3.0"' .github/workflows/build-firmware.yml
+          grep -Fq 'arduino-cli lib install "M5Unified@0.3.0"' .github/workflows/build-firmware.yml
 
       - name: Compile firmware
         run: |

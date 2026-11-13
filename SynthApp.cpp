@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.13
+  Version: v1.10.15
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -36,7 +36,7 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.13";
+  "DINMETER_FW_VERSION=v1.10.15";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
@@ -314,12 +314,32 @@ struct __attribute__((packed)) OscLayerState {
   uint8_t enabledMask; // bits 0..2 = OSC1..3
 };
 
+// FX mode shares SAM2695's reverb engine: Room 3, Delay or Pan Delay.
+// EQ is a GLOBAL four-band SAM2695 effect, despite preset-scoped storage.
+struct __attribute__((packed)) FxEqState {
+  uint8_t version;
+  uint8_t fxProgram; // 2=Room3, 6=Delay, 7=Pan Delay
+  uint8_t fxTime;
+  uint8_t fxFeedback;
+  uint8_t eqGain[4]; // bass, low-mid, high-mid, treble
+  uint8_t eqFreq[4];
+};
+
 static constexpr uint8_t GM_LAYER_VERSION = 1;
 static constexpr uint8_t OSC_LAYER_VERSION = 1;
+static constexpr uint8_t FX_EQ_VERSION = 1;
 
 Preset currentPreset;
 GmLayerState currentGmLayer = {GM_LAYER_VERSION, 0, 0, 0, 64};
 OscLayerState currentOscLayer = {OSC_LAYER_VERSION, 0x07};
+FxEqState currentFxEq = {FX_EQ_VERSION, 2, 64, 0,
+                         {96, 64, 64, 96}, {12, 27, 114, 64}};
+
+// Sources are performance-wide snapshots, not per-voice modulation.
+uint8_t modVelocity = 0;
+uint8_t modKey = 0;
+uint8_t modWheel = 0;
+uint8_t modAftertouch = 0;
 
 bool oscEnabled(uint8_t osc) {
   if (osc >= 3) return false;
@@ -336,6 +356,11 @@ uint8_t browseBank  = 0;  // encoder selects this bank
 uint8_t loadedBank  = 0;  // actually sounding bank
 uint8_t loadedSlot  = 0;  // 0..7
 bool modified       = false;
+
+// Keep the bank overlay responsive while skipping intermediate preset loads.
+static constexpr uint32_t BANK_SETTLE_MS = 500;
+bool bankSelectionPending = false;
+uint32_t bankSelectionChangedAt = 0;
 
 uint8_t masterVolume = 100;
 
@@ -438,6 +463,7 @@ enum ConfigPage : uint8_t {
   PAGE_LFO,
   PAGE_ROUTE,
   PAGE_MOD,
+  PAGE_EQ,
   PAGE_COUNT
 };
 
@@ -450,11 +476,11 @@ uint8_t selectedRoute = 0;
 
 static const char* PAGE_NAMES[PAGE_COUNT] = {
   "PERFORMANCE", "TONE / FX", "VOICE ENV", "OSC",
-  "GM LAYER", "MOD ENV", "LFO", "ROUTE", "MOD"
+  "GM LAYER", "MOD ENV", "LFO", "ROUTE", "MOD", "MASTER EQ"
 };
 
 static const char* PAGE_TAB[PAGE_COUNT] = {
-  "PF", "TN", "VE", "OS", "GM", "EN", "LF", "RT", "MD"
+  "PF", "TN", "VE", "OS", "GM", "EN", "LF", "RT", "MD", "EQ"
 };
 
 static const char* PERF_LABELS[8] = {
@@ -462,7 +488,7 @@ static const char* PERF_LABELS[8] = {
 };
 
 static const char* FILTER_LABELS[8] = {
-  "CUT", "RES", "REV", "VR", "VD", "---", "---", "---"
+  "CUT", "RES", "REV", "VR", "VD", "FX", "TIM", "FDB"
 };
 
 static const char* VOICE_ENV_LABELS[8] = {
@@ -491,6 +517,10 @@ static const char* ROUTE_LABELS[8] = {
 
 static const char* MOD_LABELS[8] = {
   "MWP", "MWF", "MWA", "RATE", "PDP", "FDP", "ADP", "VDL"
+};
+
+static const char* EQ_LABELS[8] = {
+  "LO", "LM", "HM", "HI", "LF", "MF", "HF", "TF"
 };
 
 static const char* CONFIG_BUTTON_LABELS[8] = {
@@ -820,13 +850,14 @@ void sendGsPartParameter(uint8_t ch, uint8_t addressBlock, uint8_t parameter, ui
   // SAM2695 GS DT1 style message. GS addresses use PART number, not MIDI
   // channel number, so translate the default channel->part mapping first.
   const uint8_t part = gsPartForMidiChannel(ch);
+  const uint8_t partAddress = (uint8_t)(addressBlock | (part & 0x0F));
+  const uint8_t data = value & 0x7F;
+  // GS DT1 checksum covers three address bytes and all data bytes.
+  const uint8_t checksum =
+      (uint8_t)((128 - ((0x40 + partAddress + parameter + data) & 0x7F)) & 0x7F);
   const uint8_t msg[11] = {
     0xF0, 0x41, 0x00, 0x42, 0x12, 0x40,
-    (uint8_t)(addressBlock | (part & 0x0F)),
-    parameter,
-    (uint8_t)(value & 0x7F),
-    0x00,
-    0xF7
+    partAddress, parameter, data, checksum, 0xF7
   };
   SynthSerial.write(msg, sizeof(msg));
 }
@@ -861,6 +892,18 @@ void configureLiveCutoffController(uint8_t ch) {
   sendCC(ch, LIVE_FILTER_CC2, 127);
 }
 
+// Global GS parameters use address 40 01 xx (reverb/delay engine).
+void sendGsGlobalParameter(uint8_t address, uint8_t value) {
+  const uint8_t data = value & 0x7F;
+  const uint8_t checksum =
+      (uint8_t)((128 - ((0x40 + 0x01 + address + data) & 0x7F)) & 0x7F);
+  const uint8_t msg[11] = {
+    0xF0, 0x41, 0x00, 0x42, 0x12, 0x40,
+    0x01, address, data, checksum, 0xF7
+  };
+  SynthSerial.write(msg, sizeof(msg));
+}
+
 int modulationSourceValue(uint8_t source) {
   switch (source) {
     case MODSRC_ENV1:
@@ -879,7 +922,12 @@ int modulationSourceValue(uint8_t source) {
       return constrain((int)(lfoRuntime[i].value * 127.0f), -127, 127);
     }
 
-    // Velocity / key / controllers remain reserved for later stages.
+    // Performance-wide MIDI snapshots. These do NOT imply per-note velocity
+    // modulation on a polyphonic SAM2695 voice.
+    case MODSRC_VELOCITY: return modVelocity;
+    case MODSRC_KEY: return modKey;
+    case MODSRC_MODWHEEL: return modWheel;
+    case MODSRC_AFTERTOUCH: return modAftertouch;
     default:
       return 0;
   }
@@ -1656,6 +1704,42 @@ void oscLayerKey(uint8_t index, char* out, size_t outSize) {
   snprintf(out, outSize, "o%02u", index);
 }
 
+void fxEqKey(uint8_t index, char* out, size_t outSize) {
+  snprintf(out, outSize, "f%02u", index);
+}
+
+FxEqState defaultFxEqState() {
+  // Preserve SAM2695 power-up EQ character (+6 dB low/high), and legacy
+  // Room3 reverb selection until the user explicitly edits a preset.
+  return {FX_EQ_VERSION, 2, 64, 0,
+          {96, 64, 64, 96}, {12, 27, 114, 64}};
+}
+
+void loadFxEqData(uint8_t index, FxEqState& out) {
+  out = defaultFxEqState();
+  char key[8];
+  fxEqKey(index, key, sizeof(key));
+  if (prefs.getBytesLength(key) != sizeof(FxEqState)) return;
+  FxEqState stored{};
+  prefs.getBytes(key, &stored, sizeof(stored));
+  if (stored.version != FX_EQ_VERSION) return;
+  if (stored.fxProgram != 2 && stored.fxProgram != 6 && stored.fxProgram != 7)
+    stored.fxProgram = 2;
+  stored.fxTime &= 0x7F;
+  stored.fxFeedback &= 0x7F;
+  for (uint8_t i = 0; i < 4; ++i) {
+    stored.eqGain[i] &= 0x7F;
+    stored.eqFreq[i] &= 0x7F;
+  }
+  out = stored;
+}
+
+void saveFxEqData(uint8_t index, const FxEqState& state) {
+  char key[8];
+  fxEqKey(index, key, sizeof(key));
+  prefs.putBytes(key, &state, sizeof(state));
+}
+
 OscLayerState defaultOscLayer(const Preset& preset) {
   OscLayerState state = {OSC_LAYER_VERSION, 0};
 
@@ -1766,7 +1850,8 @@ void loadPresetData(uint8_t index, Preset& out) {
 void savePresetBundle(uint8_t index,
                       const Preset& preset,
                       const GmLayerState& gmLayer,
-                      const OscLayerState& oscLayer) {
+                      const OscLayerState& oscLayer,
+                      const FxEqState& fxEq) {
   if (index >= PRESET_COUNT) return;
 
   char key[8];
@@ -1774,6 +1859,7 @@ void savePresetBundle(uint8_t index,
   prefs.putBytes(key, &preset, sizeof(Preset));
   saveGmLayerData(index, gmLayer);
   saveOscLayerData(index, oscLayer);
+  saveFxEqData(index, fxEq);
 }
 
 void deletePresetBundle(uint8_t index) {
@@ -1789,10 +1875,13 @@ void deletePresetBundle(uint8_t index) {
 
   oscLayerKey(index, key, sizeof(key));
   prefs.remove(key);
+
+  fxEqKey(index, key, sizeof(key));
+  prefs.remove(key);
 }
 
 void saveCurrentPreset() {
-  savePresetBundle(currentPresetIndex(), currentPreset, currentGmLayer, currentOscLayer);
+  savePresetBundle(currentPresetIndex(), currentPreset, currentGmLayer, currentOscLayer, currentFxEq);
   modified = false;
   screenDirty = true;
 }
@@ -1824,9 +1913,28 @@ void applyEnvelopeAll() {
 }
 
 void applyReverbAll() {
-  uint8_t level = currentPreset.reverbEnabled ? currentPreset.reverb : 0;
+  // SAM2695 shares one global reverb/delay algorithm; DEL/PAN replace Room3,
+  // they are NOT parallel, independently mixable effects.
+  const uint8_t program = currentFxEq.fxProgram;
+  sendGsGlobalParameter(0x30, program); // GS Reverb Type
+  if (program == 6 || program == 7) {
+    sendGsGlobalParameter(0x34, currentFxEq.fxTime);
+    sendGsGlobalParameter(0x35, currentFxEq.fxFeedback);
+  }
+
+  const uint8_t level =
+      currentPreset.reverbEnabled ? currentPreset.reverb : 0;
   for (uint8_t i = 0; i < 3; ++i) {
-    synth.setReverb(OSC_CH[i], 2, level, 0);
+    synth.setReverb(OSC_CH[i], program, level, 0);
+  }
+}
+
+void applyEqAll() {
+  // NRPN 37 00..03 = 4 band levels, 37 08..0B = cutoff frequencies.
+  // EQ is a shared output effect, not one EQ instance per oscillator.
+  for (uint8_t i = 0; i < 4; ++i) {
+    sendNRPN(OSC_CH[0], 0x37, i, currentFxEq.eqGain[i]);
+    sendNRPN(OSC_CH[0], 0x37, (uint8_t)(i + 8), currentFxEq.eqFreq[i]);
   }
 }
 
@@ -2195,6 +2303,7 @@ void applyCurrentPresetToSynth(bool rebuildNotes = true) {
   applyFilterAll();
   applyEnvelopeAll();
   applyReverbAll();
+  applyEqAll();
   applyVibratoAll();
   applyModAll();
   applyModeAndGlideAll();
@@ -2256,6 +2365,8 @@ void handleNoteOn(uint8_t note, uint8_t velocity) {
   heldInput[note] = true;
   heldVelocity[note] = velocity;
   pushNoteOrder(note);
+  modVelocity = velocity;
+  modKey = note;
 
   const bool phraseStart = (heldCount == 1);
   triggerModEnvelopes(phraseStart);
@@ -2601,6 +2712,12 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
       return;
     }
 
+    // The modular router also reads CC1 as an independent source.
+    if (cc == 1) {
+      modWheel = value;
+      refreshModulationOutputs(false);
+    }
+
     // Mod wheel, expression, etc.
     forwardCCToOscs(cc, value);
     return;
@@ -2610,6 +2727,8 @@ void onMidiMessage(const uint8_t (&packet)[4]) {
   if (cin == 0xC) return;
 
   if (cin == 0xD) {
+    modAftertouch = packet[2] & 0x7F;
+    refreshModulationOutputs(false);
     for (uint8_t i = 0; i < 3; ++i) {
       if (oscEnabled(i)) sendMidi2(0xD0 | OSC_CH[i], packet[2] & 0x7F);
     }
@@ -2668,6 +2787,7 @@ void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n);
 void loadPreset(uint8_t bank, uint8_t slot) {
   if (bank >= BANK_COUNT || slot >= PRESETS_PER_BANK) return;
 
+  bankSelectionPending = false;
   loadedBank = bank;
   loadedSlot = slot;
   browseBank = bank;
@@ -2675,6 +2795,7 @@ void loadPreset(uint8_t bank, uint8_t slot) {
   loadPresetData(currentPresetIndex(), currentPreset);
   loadGmLayerData(currentPresetIndex(), currentGmLayer);
   loadOscLayerData(currentPresetIndex(), currentPreset, currentOscLayer);
+  loadFxEqData(currentPresetIndex(), currentFxEq);
 
   // PERFORMANCE physical Portamento knob is authoritative.
   if (!configMode) {
@@ -2737,7 +2858,7 @@ void executePresetTool() {
     return;
   }
 
-  savePresetBundle(targetIndex, currentPreset, currentGmLayer, currentOscLayer);
+  savePresetBundle(targetIndex, currentPreset, currentGmLayer, currentOscLayer, currentFxEq);
 
   if (presetToolAction == PRESET_TOOL_MOVE) {
     deletePresetBundle(sourceIndex);
@@ -2805,6 +2926,10 @@ uint8_t currentParamAs127(uint8_t knob) {
       case 2: return currentPreset.reverb;
       case 3: return currentPreset.vibratoRate;
       case 4: return currentPreset.vibratoDepth;
+      case 5: return currentFxEq.fxProgram == 2 ? 0
+                   : (currentFxEq.fxProgram == 6 ? 64 : 127);
+      case 6: return currentFxEq.fxTime;
+      case 7: return currentFxEq.fxFeedback;
       default: return 0;
     }
   }
@@ -2872,8 +2997,8 @@ uint8_t currentParamAs127(uint8_t knob) {
     const ModRoute& route = currentPreset.routes[selectedRoute];
     switch (knob) {
       case 0: {
-        uint8_t src = (route.source <= MODSRC_LFO3) ? route.source : (uint8_t)MODSRC_NONE;
-        return (uint8_t)(((uint16_t)src * 127) / MODSRC_LFO3);
+        uint8_t src = (route.source <= MODSRC_AFTERTOUCH) ? route.source : (uint8_t)MODSRC_NONE;
+        return (uint8_t)(((uint16_t)src * 127) / MODSRC_AFTERTOUCH);
       }
       case 1: {
         uint8_t dst = route.destination <= MODDST_AMP
@@ -2900,13 +3025,18 @@ uint8_t currentParamAs127(uint8_t knob) {
     }
   }
 
+  if (page == PAGE_EQ) {
+    return knob < 4 ? currentFxEq.eqGain[knob]
+                    : currentFxEq.eqFreq[knob - 4];
+  }
+
   return 0;
 }
 
 bool knobIsReserved(uint8_t knob) {
   uint8_t page = configMode ? configPage : (uint8_t)PAGE_PERF;
 
-  if (page == PAGE_FILTER_ENV) return knob >= 5;
+  if (page == PAGE_FILTER_ENV) return false;
   if (page == PAGE_VOICE_ENV) return knob >= 3;
   if (page == PAGE_OSC) return false;
   if (page == PAGE_GM) return knob >= 4;
@@ -3169,6 +3299,26 @@ void applyFilterPageKnob(uint8_t knob, uint8_t v) {
       if (changed) applyVibratoAll();
       break;
 
+    case 5: {
+      const uint8_t fx = v < 43 ? 2 : (v < 86 ? 6 : 7);
+      changed = currentFxEq.fxProgram != fx;
+      currentFxEq.fxProgram = fx;
+      if (changed) applyReverbAll();
+      break;
+    }
+
+    case 6:
+      changed = currentFxEq.fxTime != v;
+      currentFxEq.fxTime = v;
+      if (changed && currentFxEq.fxProgram != 2) applyReverbAll();
+      break;
+
+    case 7:
+      changed = currentFxEq.fxFeedback != v;
+      currentFxEq.fxFeedback = v;
+      if (changed && currentFxEq.fxProgram != 2) applyReverbAll();
+      break;
+
     default:
       return;
   }
@@ -3379,6 +3529,17 @@ void applyModPageKnob(uint8_t knob, uint8_t v) {
   if (changed) markModified();
 }
 
+void applyEqPageKnob(uint8_t knob, uint8_t v) {
+  uint8_t* param = knob < 4
+      ? &currentFxEq.eqGain[knob]
+      : &currentFxEq.eqFreq[knob - 4];
+  if (*param == v) return;
+
+  *param = v;
+  sendNRPN(OSC_CH[0], 0x37, knob < 4 ? knob : (uint8_t)(knob + 4), v);
+  markModified();
+}
+
 void applyEnvPageKnob(uint8_t knob, uint8_t v) {
   EnvelopeState& env = currentPreset.env[selectedEnv];
   bool changed = false;
@@ -3456,8 +3617,8 @@ void applyRoutePageKnob(uint8_t knob, uint8_t v) {
 
   switch (knob) {
     case 0: {
-      uint8_t source = (uint8_t)(((uint16_t)v * 7) / 128);
-      if (source > MODSRC_LFO3) source = MODSRC_LFO3;
+      uint8_t source = (uint8_t)(((uint16_t)v * (MODSRC_AFTERTOUCH + 1)) / 128);
+      if (source > MODSRC_AFTERTOUCH) source = MODSRC_AFTERTOUCH;
       changed = route.source != source;
       route.source = source;
       break;
@@ -3516,6 +3677,8 @@ void applyKnobValue(uint8_t knob, uint8_t value) {
     applyRoutePageKnob(knob, value);
   } else if (page == PAGE_MOD) {
     applyModPageKnob(knob, value);
+  } else if (page == PAGE_EQ) {
+    applyEqPageKnob(knob, value);
   }
 
   screenDirty = true;
@@ -3529,6 +3692,12 @@ bool lastConfigRaw = false;
 
 void handleConfigModeChange(bool newMode) {
   if (newMode == configMode) return;
+
+  // If the player opens CONFIG during a pending bank selection, finish
+  // selecting the visible bank first rather than editing the prior sound.
+  if (newMode && bankSelectionPending) {
+    loadPreset(browseBank, PRESETS_PER_BANK - 1);
+  }
 
   if (!newMode) {
     setConfigAuditionEnabled(false);
@@ -4386,7 +4555,11 @@ void handleEncoderRotate(int detents) {
       configPage = (uint8_t)p;
       armPickupForCurrentContext();
       updateByteLeds();
-      showPageOverlay();
+      // Tabs are already drawn in drawConfigScreen(). Avoid the full-screen
+      // PAGE CHANGE overlay, so the player's eyes remain on the controls.
+      overlayActive = false;
+      paramPopupActive = false;
+      screenDirty = true;
     }
     return;
   }
@@ -4396,14 +4569,29 @@ void handleEncoderRotate(int detents) {
   while (b >= BANK_COUNT) b -= BANK_COUNT;
   if ((uint8_t)b != browseBank) {
     browseBank = (uint8_t)b;
+    bankSelectionPending = true;
+    bankSelectionChangedAt = millis();
     updateByteLeds();
 
     snprintf(overlayTitle, sizeof(overlayTitle), "BANK SELECT");
     snprintf(overlaySub, sizeof(overlaySub), "%s", BANK_GROUP_NAMES[browseBank]);
     overlayActive = true;
-    overlayUntil = millis() + 1200;
+    overlayUntil = bankSelectionChangedAt + BANK_SETTLE_MS + 60;
     screenDirty = true;
   }
+}
+
+void commitBankSelectionIfIdle() {
+  if (!bankSelectionPending ||
+      (uint32_t)(millis() - bankSelectionChangedAt) < BANK_SETTLE_MS) return;
+
+  // Physical leftmost ByteButton maps to logical slot 7 in this firmware.
+  loadPreset(browseBank, PRESETS_PER_BANK - 1);
+  armPickupForCurrentContext();
+  updateByteLeds();
+  paramPopupActive = false;
+  overlayActive = false;  // land on PERFORMANCE as the new sound is loaded
+  screenDirty = true;
 }
 
 void openSaveDialog() {
@@ -5470,7 +5658,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.13");
+  M5.Display.print("FW          : v1.10.15");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -5524,7 +5712,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.13  LATEST ");
+    M5.Display.print("FW v1.10.15  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -5731,6 +5919,7 @@ const char** labelsForPage(uint8_t page) {
   if (page == PAGE_ENV) return ENV_LABELS;
   if (page == PAGE_LFO) return LFO_LABELS;
   if (page == PAGE_ROUTE) return ROUTE_LABELS;
+  if (page == PAGE_EQ) return EQ_LABELS;
   return MOD_LABELS;
 }
 
@@ -5748,6 +5937,10 @@ const char* routeSourceLabel(uint8_t source) {
     case MODSRC_LFO1: return "L1";
     case MODSRC_LFO2: return "L2";
     case MODSRC_LFO3: return "L3";
+    case MODSRC_VELOCITY: return "VEL";
+    case MODSRC_KEY: return "KEY";
+    case MODSRC_MODWHEEL: return "MW";
+    case MODSRC_AFTERTOUCH: return "AT";
     default: return "---";
   }
 }
@@ -5774,9 +5967,29 @@ const char* lfoWaveLabel(uint8_t waveform) {
 }
 
 void formatParamValue(uint8_t page, uint8_t knob, char* out, size_t n) {
-  if (page == PAGE_PERF || page == PAGE_FILTER_ENV ||
-      page == PAGE_VOICE_ENV || page == PAGE_MOD) {
+  if (page == PAGE_PERF || page == PAGE_VOICE_ENV || page == PAGE_MOD) {
     snprintf(out, n, "%u", currentParamAs127(knob));
+    return;
+  }
+
+  if (page == PAGE_FILTER_ENV) {
+    if (knob == 5) {
+      const char* fx = currentFxEq.fxProgram == 6 ? "DEL"
+                     : currentFxEq.fxProgram == 7 ? "PAN" : "REV";
+      snprintf(out, n, "%s", fx);
+    } else {
+      snprintf(out, n, "%u", currentParamAs127(knob));
+    }
+    return;
+  }
+
+  if (page == PAGE_EQ) {
+    if (knob < 4) {
+      const int db = ((int)currentFxEq.eqGain[knob] * 24 + 63) / 127 - 12;
+      snprintf(out, n, "%+ddB", db);
+    } else {
+      snprintf(out, n, "%u", currentFxEq.eqFreq[knob - 4]);
+    }
     return;
   }
 
@@ -6098,7 +6311,10 @@ void synthAppSetup() {
   // Display / Din Meter
   auto cfg = M5.config();
   M5.begin(cfg);
-  M5.Display.setRotation(1);
+  // M5GFX 0.3.0 standardizes upright orientation to rotation 0.
+  // On DinMeter this is landscape (240x135); rotation 1 is PORTRAIT.
+  // Keep aligned with CI-pinned M5Unified/M5GFX versions.
+  M5.Display.setRotation(0);
   M5.Display.setBrightness(170);
   clearScreen();
 
@@ -6158,6 +6374,7 @@ void synthAppSetup() {
   loadPresetData(currentPresetIndex(), currentPreset);
   loadGmLayerData(currentPresetIndex(), currentGmLayer);
   loadOscLayerData(currentPresetIndex(), currentPreset, currentOscLayer);
+  loadFxEqData(currentPresetIndex(), currentFxEq);
 
   // Current physical volume is authoritative at boot.
   uint16_t volRaw = angle8.getAnalogInput(0, _12bit);
@@ -6192,7 +6409,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.13");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.15");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -6240,13 +6457,14 @@ void synthAppLoop() {
   }
 
   pollEncoderButton();
+  commitBankSelectionIfIdle();
   drawUiIfNeeded();
 }
 
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.13
+  Version: v1.10.15
   END
   ======================================================================
 */

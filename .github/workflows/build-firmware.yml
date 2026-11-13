@@ -43,10 +43,11 @@ jobs:
       - name: Install Arduino libraries
         run: |
           arduino-cli lib update-index
-          # M5GFX 0.3.0 changed DinMeter setRotation() semantics:
-          # M5Unified/M5GFX MUST stay in lockstep with SynthApp.cpp.
-          arduino-cli lib install "M5GFX@0.3.0"
-          arduino-cli lib install "M5Unified@0.3.0"
+          # Use the current releases for CI compatibility probing. The gate
+          # below prevents unreviewed changes from reaching build artifacts
+          # or GitHub Releases, even when the upstream versions move.
+          arduino-cli lib install "M5GFX"
+          arduino-cli lib install "M5Unified"
 
           mkdir -p "$HOME/Arduino/libraries"
           git clone --depth 1 https://github.com/m5stack/M5Unit-8Angle.git "$HOME/Arduino/libraries/M5Unit-8Angle"
@@ -74,12 +75,57 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Firmware version: $VERSION"
 
-      - name: Verify DinMeter landscape rotation and library lock
+      - name: Detect upstream dependency updates before compilation or release
+        shell: bash
         run: |
+          set -euo pipefail
+
+          # Known-working v1.10.15 baseline. These are REVIEW reference
+          # values, not install constraints. Any update stops the CI run
+          # until its changelog, breaking changes and device impact are
+          # independently reviewed and these values are deliberately revised.
+          declare -A reviewed=(
+            [M5GFX]="0.3.0"
+            [M5Unified]="0.3.0"
+            [M5Unit-8Angle]="eb8263555f4563cd5b8b27276869789a5adfa50f"
+            [M5Unit-ByteButton]="160e4543606d97b228ba8ac14c5178dd797ac87c"
+            [M5-SAM2695]="a83a2f5839eedaca6571ff7bcd72de18f283e77e"
+            [esp32-usb-host-midi-library]="d975f96eb076444da4f41b316b766b5dcc201751"
+          )
+
+          library_version() {
+            local file="$HOME/Arduino/libraries/$1/library.properties"
+            test -f "$file" || { echo "::error::Missing library $file"; return 1; }
+            sed -n 's/^version=//p' "$file" | tr -d '\r' | head -n 1
+          }
+
+          mismatches=0
+          check_reviewed() {
+            local name="$1" actual="$2"
+            echo "$name: actual=$actual reviewed=${reviewed[$name]}"
+            if [[ -z "$actual" || "$actual" != "${reviewed[$name]}" ]]; then
+              echo "::error::$name changed: actual=$actual, reviewed=${reviewed[$name]}. Review upstream diff/compatibility before approving this update."
+              mismatches=1
+            fi
+          }
+
+          check_reviewed M5GFX "$(library_version M5GFX)"
+          check_reviewed M5Unified "$(library_version M5Unified)"
+          check_reviewed M5Unit-8Angle "$(git -C "$HOME/Arduino/libraries/M5Unit-8Angle" rev-parse HEAD)"
+          check_reviewed M5Unit-ByteButton "$(git -C "$HOME/Arduino/libraries/M5Unit-ByteButton" rev-parse HEAD)"
+          check_reviewed M5-SAM2695 "$(git -C "$HOME/Arduino/libraries/M5-SAM2695" rev-parse HEAD)"
+          check_reviewed esp32-usb-host-midi-library "$(git -C /tmp/omocha rev-parse HEAD)"
+
+          # M5GFX 0.3.0 introduced a rotation behavior change on DinMeter.
+          # Even when dependencies are approved, keep the landscape invariant.
           grep -Fq 'M5.Display.setRotation(0);' SynthApp.cpp
           ! grep -Fq 'M5.Display.setRotation(1);' SynthApp.cpp
-          grep -Fq 'arduino-cli lib install "M5GFX@0.3.0"' .github/workflows/build-firmware.yml
-          grep -Fq 'arduino-cli lib install "M5Unified@0.3.0"' .github/workflows/build-firmware.yml
+
+          if (( mismatches )); then
+            echo "::error::Dependency review required. No firmware artifact or release will be produced."
+            exit 1
+          fi
+          echo "Upstream dependencies match reviewed baseline; build may proceed."
 
       - name: Compile firmware
         run: |

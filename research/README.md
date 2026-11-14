@@ -17,6 +17,7 @@
 
 - [第4回｜SST Filtersのフィルター設計](foundations/2026-11-13-sst-filters-control-audio-rate.md) — voice独立の内部状態、制御レートと音声レート、SIMD/GPLの移植制約。
 
+- [第5回｜ADSRの指数カーブ・時間定義・再トリガ](foundations/2026-11-14-adsr-curve-rate-retrigger.md) — Constant Rate/Time、ENV曲線、レガート時の挙動、SAM内蔵ENVとESP32 MOD ENVの差。
 ## 安価な音源・DSP基板の調査（GM音源以外）
 
 GMのROM音源制御に限定せず、**波形そのものを合成できる音源構成や、アナログVCO/VCF/VCAを安く組める部品**も調査する。部品価格だけでなく、完成に必要な付属回路・入出力・現行DinMeterの再利用可能性も比較する。

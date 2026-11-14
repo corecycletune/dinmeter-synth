@@ -29,6 +29,10 @@
 - [2026-11-10｜3つの名機＋Surge XTから学ぶ基本設計](2026-11-10-classic-synth-architectures.md)  
   Minimoog Model D / KORG MS-20 / Prophet-5 / Surge XT を、音声経路・変調・DinMeterへの応用可能性の軸で比較。
 
+## 第5回：ENVの曲線・時間定義・再トリガ
+
+- [2026-11-14｜ADSRのConstant Rate/Timeと指数曲線](2026-11-14-adsr-curve-rate-retrigger.md) — EarLevelの原理・公開APIを確認。DaisySP実装本体は未読、実機未検証。
+
 ## 第4回：フィルターの音声レートと制御レート
 
 - [2026-11-13｜SST Filters：voiceごとの状態と係数更新の分離](2026-11-13-sst-filters-control-audio-rate.md) — 4-wide SIMD、制御ブロック、サンプル処理、GPL-3、ESP32への移植制約。ヘッダ/API確認、実機未検証。

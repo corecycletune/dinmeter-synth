@@ -29,6 +29,11 @@
 - [2026-11-10｜3つの名機＋Surge XTから学ぶ基本設計](2026-11-10-classic-synth-architectures.md)  
   Minimoog Model D / KORG MS-20 / Prophet-5 / Surge XT を、音声経路・変調・DinMeterへの応用可能性の軸で比較。
 
+
+## 第6回：波形変形・PWMと折り返しノイズ
+
+- [2026-11-15｜Plaits Variable SawとDaisySP PolyBLEPのソース比較](2026-11-15-variable-saw-pwm-bandlimiting.md) — 高音でPWM幅を制約する設計、BLEP補正、パラメータ補間、SAM2695との違い。実機未検証。
+
 ## 第5回：ENVの曲線・時間定義・再トリガ
 
 - [2026-11-14｜ADSRのConstant Rate/Timeと指数曲線](2026-11-14-adsr-curve-rate-retrigger.md) — EarLevelの原理・公開APIを確認。DaisySP実装本体は未読、実機未検証。

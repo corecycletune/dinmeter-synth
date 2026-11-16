@@ -5255,12 +5255,20 @@ void drawSystemMenu() {
       M5.Display.setTextColor(C_BLACK, C_YELLOW);
       M5.Display.setCursor(15, y);
       M5.Display.print("> ");
-      M5.Display.print(SYSTEM_MENU_ITEMS[i]);
+      if (i == 7) {
+        M5.Display.print(soundLibrary == SOUND_LIBRARY_ARTIST ? "LIBRARY: ARTIST" : "LIBRARY: LEGACY");
+      } else {
+        M5.Display.print(SYSTEM_MENU_ITEMS[i]);
+      }
     } else {
       M5.Display.setTextColor(C_WHITE, C_BLACK);
       M5.Display.setCursor(15, y);
       M5.Display.print("  ");
-      M5.Display.print(SYSTEM_MENU_ITEMS[i]);
+      if (i == 7) {
+        M5.Display.print(soundLibrary == SOUND_LIBRARY_ARTIST ? "LIBRARY: ARTIST" : "LIBRARY: LEGACY");
+      } else {
+        M5.Display.print(SYSTEM_MENU_ITEMS[i]);
+      }
     }
   }
 

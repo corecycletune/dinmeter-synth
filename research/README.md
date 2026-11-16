@@ -20,6 +20,8 @@
 - [第5回｜ADSRの指数カーブ・時間定義・再トリガ](foundations/2026-11-14-adsr-curve-rate-retrigger.md) — Constant Rate/Time、ENV曲線、レガート時の挙動、SAM内蔵ENVとESP32 MOD ENVの差。
 - [第6回｜Plaits Variable SawとDaisySP PolyBLEP](foundations/2026-11-15-variable-saw-pwm-bandlimiting.md) — PWM幅の高音域制限、波形のエッジ補正、ブロック内補間。GM-ROM方式と自前DSPの違い。
 
+- [第7回｜Surge XTのノート所有権・Mono優先順位・Voice再利用](foundations/2026-11-16-surge-voice-ownership.md) — 押鍵集合と実発音の分離、high/low/latest優先、ENV再トリガとGlideの独立性。コード一部精読、実機未検証。
+
 ## 安価な音源・DSP基板の調査（GM音源以外）
 
 GMのROM音源制御に限定せず、**波形そのものを合成できる音源構成や、アナログVCO/VCF/VCAを安く組める部品**も調査する。部品価格だけでなく、完成に必要な付属回路・入出力・現行DinMeterの再利用可能性も比較する。

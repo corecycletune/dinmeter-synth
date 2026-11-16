@@ -30,6 +30,10 @@
   Minimoog Model D / KORG MS-20 / Prophet-5 / Surge XT を、音声経路・変調・DinMeterへの応用可能性の軸で比較。
 
 
+## 第7回：Mono優先順位とVoice再利用
+
+- [第7回｜Surge XTのノート所有権・Mono優先順位・Voice再利用](2026-11-16-surge-voice-ownership.md) — 押鍵集合と実発音の分離、high/low/latest優先、ENV再トリガとGlideの独立性。コード一部精読、実機未検証。
+
 ## 第6回：波形変形・PWMと折り返しノイズ
 
 - [2026-11-15｜Plaits Variable SawとDaisySP PolyBLEPのソース比較](2026-11-15-variable-saw-pwm-bandlimiting.md) — 高音でPWM幅を制約する設計、BLEP補正、パラメータ補間、SAM2695との違い。実機未検証。

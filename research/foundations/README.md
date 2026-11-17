@@ -30,6 +30,10 @@
   Minimoog Model D / KORG MS-20 / Prophet-5 / Surge XT を、音声経路・変調・DinMeterへの応用可能性の軸で比較。
 
 
+## 第8回：Voice / Scene / Global Mod Matrix
+
+- [2026-11-17｜Surge XTの変調スコープと状態所有権](2026-11-17-surge-modulation-scope.md) — ModulationSourceとSurgePatchのソース確認、変調スコープの3分類、SAM2695での近似限界。実機未検証。
+
 ## 第7回：Mono優先順位とVoice再利用
 
 - [第7回｜Surge XTのノート所有権・Mono優先順位・Voice再利用](2026-11-16-surge-voice-ownership.md) — 押鍵集合と実発音の分離、high/low/latest優先、ENV再トリガとGlideの独立性。コード一部精読、実機未検証。

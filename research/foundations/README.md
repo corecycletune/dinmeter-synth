@@ -30,6 +30,10 @@
   Minimoog Model D / KORG MS-20 / Prophet-5 / Surge XT を、音声経路・変調・DinMeterへの応用可能性の軸で比較。
 
 
+## 第9回：Warpsの音声レート・クロスモジュレーション
+
+- [2026-11-18｜Warpsのリング変調・XOR・wavefold](2026-11-18-warps-audio-rate-cross-modulation.md) — 音声の加算と乗算の違い、和・差側帯波、非線形飽和、入力ゲイン、アルゴリズム補間、SAM2695の制約。公式マニュアルとソース該当関数確認、実機未検証。
+
 ## 第8回：Voice / Scene / Global Mod Matrix
 
 - [2026-11-17｜Surge XTの変調スコープと状態所有権](2026-11-17-surge-modulation-scope.md) — ModulationSourceとSurgePatchのソース確認、変調スコープの3分類、SAM2695での近似限界。実機未検証。

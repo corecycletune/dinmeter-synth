@@ -26,6 +26,8 @@
 
 - [第9回｜Mutable Instruments Warpsの音声レート・リング変調](foundations/2026-11-18-warps-audio-rate-cross-modulation.md) — OSC加算と乗算の和差側帯波、アナログ風/デジタルリング、XOR/波形折り畳み、GM MIDI制御では近似できない理由。ソース該当関数を精読、実機未検証。
 
+- [第10回｜AMYの残響ネットワークとDSPメモリ予算](foundations/2026-11-19-amy-reverb-delay-network.md) — 6本の初期反射と4本の循環遅延、フィードバックLPF、108KiBのバッファ、44.1/48kHzの時間差。ソース精読、実機未検証。
+
 ## 安価な音源・DSP基板の調査（GM音源以外）
 
 GMのROM音源制御に限定せず、**波形そのものを合成できる音源構成や、アナログVCO/VCF/VCAを安く組める部品**も調査する。部品価格だけでなく、完成に必要な付属回路・入出力・現行DinMeterの再利用可能性も比較する。

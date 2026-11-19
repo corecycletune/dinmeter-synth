@@ -1,7 +1,7 @@
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.16
+  Version: v1.10.17
   Target : M5Stack Din Meter v1.1 + ByteButton + 8Angle + MIDI Unit U187
   ======================================================================
 
@@ -36,13 +36,14 @@
 // Embedded in the compiled .bin so Web OTA can inspect the selected
 // firmware version BEFORE any upload starts.
 static const char DINMETER_FW_MARKER[] __attribute__((used)) =
-  "DINMETER_FW_VERSION=v1.10.16";
+  "DINMETER_FW_VERSION=v1.10.17";
 #include <M5Unified.h>
 #include <M5_ANGLE8.h>
 #include <unit_byte.hpp>
 #include <M5_SAM2695.h>
 #include "UsbMidi.h"
 #include "LegacyPresets.h"
+#include "ArtistPresets.h"
 #include "WifiMaintenance.h"
 
 // ======================================================================
@@ -291,14 +292,18 @@ static constexpr uint8_t BANK_COUNT = 9;
 static constexpr uint8_t PRESETS_PER_BANK = 8;
 static constexpr uint8_t GM_BANK_INDEX = BANK_COUNT - 1;
 static constexpr uint8_t PRESET_COUNT = BANK_COUNT * PRESETS_PER_BANK;
+// Separate NVS namespaces prevent new sound design from overwriting old patches.
+static constexpr uint8_t SOUND_LIBRARY_LEGACY = 0;
+static constexpr uint8_t SOUND_LIBRARY_ARTIST = 1;
+uint8_t soundLibrary = SOUND_LIBRARY_ARTIST;
 
 static const char* BANK_SHORT_NAMES[BANK_COUNT] = {
   "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "GM"
 };
 
 static const char* BANK_GROUP_NAMES[BANK_COUNT] = {
-  "BANK 1", "BANK 2", "BANK 3", "BANK 4",
-  "BANK 5", "BANK 6", "BANK 7", "BANK 8", "GM"
+  "FUNK BASS", "LEAD SOLO", "JAZZ FUSION", "NEO SOUL",
+  "MODERN SYNTH", "DUB REGGAE", "DUBSTEP", "EXPERIMENTAL", "GM STANDARD"
 };
 
 struct __attribute__((packed)) GmLayerState {
@@ -419,14 +424,14 @@ struct GmQuickPreset {
 };
 
 static const GmQuickPreset GM_QUICK_PRESETS[PRESETS_PER_BANK] = {
-  {"GM Grand Piano", 0},
-  {"GM EPiano 1",    4},
-  {"GM EPiano 2",    5},
-  {"GM Vibraphone", 11},
-  {"GM Draw Organ", 16},
-  {"GM Finger Bass",33},
-  {"GM Warm Pad",   89},
-  {"GM Saw Lead",   81},
+  {"GM Grand Piano",   0},
+  {"GM EPiano 1",      4},
+  {"GM EPiano 2",      5},
+  {"GM Drawbar Organ",16},
+  {"GM Clavinet",      7},
+  {"GM Vibraphone",   11},
+  {"GM Acoustic Bass",32},
+  {"GM String Ens",   48},
 };
 
 static const char* GM_PROGRAM_NAMES[128] = {
@@ -780,7 +785,7 @@ static const char* PRESET_TOOLS_MENU_ITEMS[PRESET_TOOLS_MENU_COUNT] = {
   "BACK"
 };
 
-static constexpr uint8_t SYSTEM_MENU_COUNT = 8;
+static constexpr uint8_t SYSTEM_MENU_COUNT = 9;
 static const char* SYSTEM_MENU_ITEMS[SYSTEM_MENU_COUNT] = {
   "SAVE PRESET",
   "PRESET TOOLS",
@@ -789,6 +794,7 @@ static const char* SYSTEM_MENU_ITEMS[SYSTEM_MENU_COUNT] = {
   "WIFI SELECT",
   "USB FLASH",
   "SYSTEM INFO",
+  "SOUND LIBRARY",
   "EXIT"
 };
 
@@ -1656,10 +1662,68 @@ Preset makeGmQuickPreset(uint8_t slot) {
   return p;
 }
 
+// Uses existing SAM2695 wave materials with independently designed
+// levels, envelopes, LFO and live filter modulation for each artist patch.
+Preset makeArtistPreset(uint8_t index) {
+  const ArtistPatchDef& a = ARTIST_PATCHES[index];
+  Preset p = makeInitPreset(index);
+  strncpy(p.name, a.name, sizeof(p.name) - 1);
+  p.name[sizeof(p.name) - 1] = '\0';
+  for (uint8_t i = 0; i < 3; ++i) {
+    const ArtistOscDef& layer = a.osc[i];
+    OscState& out = p.osc[i];
+    out.level = 0;
+    out.bank = 0;
+    out.program = 0;
+    out.transpose = layer.transpose;
+    out.detune = layer.detune;
+    out.cutoffTrim = 0;
+    out.resonanceTrim = 0;
+    out.pan = 64;
+    if (layer.material < sizeof(WAVE_TABLE) / sizeof(WAVE_TABLE[0]) &&
+        layer.level > 0) {
+      out.bank = WAVE_TABLE[layer.material].bank;
+      out.program = WAVE_TABLE[layer.material].program;
+      out.level = layer.level;
+    }
+  }
+  p.cutoff = a.cutoff;
+  p.resonance = a.resonance;
+  p.attack = a.attack;
+  p.decay = a.decay;
+  p.release = a.release;
+  p.mono = a.mono;
+  p.glide = 0; // physical GLIDE control wins in PERFORMANCE
+  p.legato = 1;
+  p.glideTime = a.glideTime;
+  p.reverb = a.fxSend;
+  p.reverbEnabled = a.fxSend > 0 ? 1 : 0;
+  p.legacyChorusSend = a.chorusSend;
+
+  // MOD ENV1 is a controller-level filter contour, not SAM's voice ADSR.
+  p.env[0] = {a.filterEnv.attack, a.filterEnv.decay,
+              a.filterEnv.sustain, a.filterEnv.release,
+              ENV_CURVE_LOG, 1};
+  if (a.filterEnv.amount != 0)
+    p.routes[0] = {MODSRC_ENV1, MODDST_CUTOFF, a.filterEnv.amount, 1};
+
+  if (a.lfo.destination >= MODDST_CUTOFF &&
+      a.lfo.destination <= MODDST_AMP && a.lfo.amount != 0) {
+    p.lfo[0] = {a.lfo.waveform, a.lfo.rate, 0, 0, 0, 0};
+    p.routes[1] = {MODSRC_LFO1, a.lfo.destination, a.lfo.amount, 1};
+  }
+  p.routes[2] = {MODSRC_MODWHEEL, MODDST_CUTOFF, 20, 1};
+  return p;
+}
+
 Preset makeDefaultPreset(uint8_t index) {
   const uint8_t gmStart = GM_BANK_INDEX * PRESETS_PER_BANK;
   if (index >= gmStart && index < PRESET_COUNT) {
     return makeGmQuickPreset(index - gmStart);
+  }
+
+  if (soundLibrary == SOUND_LIBRARY_ARTIST && index < ARTIST_PATCH_COUNT) {
+    return makeArtistPreset(index);
   }
 
   if (index >= LEGACY_PATCH_COUNT) {
@@ -1712,30 +1776,36 @@ Preset makeDefaultPreset(uint8_t index) {
 }
 
 void presetKey(uint8_t index, char* out, size_t outSize) {
-  snprintf(out, outSize, "p%02u", index);
+  snprintf(out, outSize, soundLibrary == SOUND_LIBRARY_ARTIST ? "a%02u" : "p%02u", index);
 }
 
 void gmLayerKey(uint8_t index, char* out, size_t outSize) {
-  snprintf(out, outSize, "g%02u", index);
+  snprintf(out, outSize, soundLibrary == SOUND_LIBRARY_ARTIST ? "b%02u" : "g%02u", index);
 }
 
 void oscLayerKey(uint8_t index, char* out, size_t outSize) {
-  snprintf(out, outSize, "o%02u", index);
+  snprintf(out, outSize, soundLibrary == SOUND_LIBRARY_ARTIST ? "c%02u" : "o%02u", index);
 }
 
 void fxEqKey(uint8_t index, char* out, size_t outSize) {
-  snprintf(out, outSize, "f%02u", index);
+  snprintf(out, outSize, soundLibrary == SOUND_LIBRARY_ARTIST ? "d%02u" : "f%02u", index);
 }
 
-FxEqState defaultFxEqState() {
-  // Preserve SAM2695 power-up EQ character (+6 dB low/high), and legacy
-  // Room3 reverb selection until the user explicitly edits a preset.
-  return {FX_EQ_VERSION, 2, 64, 0,
-          {96, 64, 64, 96}, {12, 27, 114, 64}};
+FxEqState defaultFxEqState(uint8_t index) {
+  // SAM2695 uses one GLOBAL reverb/delay engine, not one per OSC.
+  FxEqState state = {FX_EQ_VERSION, 2, 64, 0,
+                     {96, 64, 64, 96}, {12, 27, 114, 64}};
+  if (soundLibrary == SOUND_LIBRARY_ARTIST && index < ARTIST_PATCH_COUNT) {
+    const ArtistPatchDef& a = ARTIST_PATCHES[index];
+    state.fxProgram = a.fxProgram;
+    state.fxTime = (a.fxProgram == 2) ? 64 : 75;
+    state.fxFeedback = (a.fxProgram == 2) ? 0 : 58;
+  }
+  return state;
 }
 
 void loadFxEqData(uint8_t index, FxEqState& out) {
-  out = defaultFxEqState();
+  out = defaultFxEqState(index);
   char key[8];
   fxEqKey(index, key, sizeof(key));
   if (prefs.getBytesLength(key) != sizeof(FxEqState)) return;
@@ -1834,6 +1904,7 @@ bool allOscillatorsSilent(const Preset& p) {
 }
 
 void recoverAccidentallySilentFactoryPreset(uint8_t index, Preset& out) {
+  if (soundLibrary != SOUND_LIBRARY_LEGACY) return;
   if (index >= LEGACY_PATCH_COUNT || !allOscillatorsSilent(out)) return;
 
   Preset factory = makeDefaultPreset(index);
@@ -4422,7 +4493,17 @@ void selectSystemMenuItem() {
       screenDirty = true;
       return;
 
-    case 7: // EXIT
+    case 7: // SOUND LIBRARY toggles between preserved legacy and new bank.
+      soundLibrary = (soundLibrary == SOUND_LIBRARY_ARTIST)
+                   ? SOUND_LIBRARY_LEGACY : SOUND_LIBRARY_ARTIST;
+      prefs.putUChar("library", soundLibrary);
+      systemMenuActive = false;
+      loadPreset(loadedBank, loadedSlot);
+      armPickupForCurrentContext();
+      updateByteLeds();
+      return;
+
+    case 8: // EXIT
     default:
       closeSystemMenu();
       return;
@@ -5163,20 +5244,31 @@ void drawSystemMenu() {
 
   M5.Display.setTextSize(1);
 
-  for (uint8_t i = 0; i < SYSTEM_MENU_COUNT; ++i) {
-    int y = 42 + i * 10;
+  // Limit visible entries to eight lines on the small DIN display.
+  const uint8_t firstItem = systemMenuIndex < 8 ? 0 : SYSTEM_MENU_COUNT - 8;
+  const uint8_t stopItem = min((int)SYSTEM_MENU_COUNT, (int)firstItem + 8);
+  for (uint8_t i = firstItem; i < stopItem; ++i) {
+    int y = 42 + (i - firstItem) * 10;
 
     if (i == systemMenuIndex) {
       M5.Display.fillRect(10, y - 2, w - 20, 11, C_YELLOW);
       M5.Display.setTextColor(C_BLACK, C_YELLOW);
       M5.Display.setCursor(15, y);
       M5.Display.print("> ");
-      M5.Display.print(SYSTEM_MENU_ITEMS[i]);
+      if (i == 7) {
+        M5.Display.print(soundLibrary == SOUND_LIBRARY_ARTIST ? "LIBRARY: ARTIST" : "LIBRARY: LEGACY");
+      } else {
+        M5.Display.print(SYSTEM_MENU_ITEMS[i]);
+      }
     } else {
       M5.Display.setTextColor(C_WHITE, C_BLACK);
       M5.Display.setCursor(15, y);
       M5.Display.print("  ");
-      M5.Display.print(SYSTEM_MENU_ITEMS[i]);
+      if (i == 7) {
+        M5.Display.print(soundLibrary == SOUND_LIBRARY_ARTIST ? "LIBRARY: ARTIST" : "LIBRARY: LEGACY");
+      } else {
+        M5.Display.print(SYSTEM_MENU_ITEMS[i]);
+      }
     }
   }
 
@@ -5695,7 +5787,7 @@ void drawSystemInfo() {
   M5.Display.setTextColor(C_WHITE, C_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 52);
-  M5.Display.print("FW          : v1.10.16");
+  M5.Display.print("FW          : v1.10.17");
 
   M5.Display.setCursor(10, 68);
   M5.Display.print("WIFI SAVED  : ");
@@ -5749,7 +5841,7 @@ void drawWifiRuntimeScreen() {
 
   M5.Display.setCursor(10, 98);
   if (wifiMaintStaConnected()) {
-    M5.Display.print("FW v1.10.16  LATEST ");
+    M5.Display.print("FW v1.10.17  LATEST ");
     M5.Display.print(wifiMaintLatestVersion());
   } else if (wifiMaintMode() == WifiMaintMode::MAINT_AP &&
              wifiMaintLastFailure().length() > 0) {
@@ -6404,6 +6496,9 @@ void synthAppSetup() {
   // Decide whether this boot should return directly to MAINTENANCE.
   evaluateMaintenanceResumeAtBoot();
 
+  soundLibrary = prefs.getUChar("library", SOUND_LIBRARY_ARTIST);
+  if (soundLibrary != SOUND_LIBRARY_LEGACY) soundLibrary = SOUND_LIBRARY_ARTIST;
+
   loadedBank = prefs.getUChar("bank", 0);
   loadedSlot = prefs.getUChar("slot", 0);
   if (loadedBank >= BANK_COUNT) loadedBank = 0;
@@ -6448,7 +6543,7 @@ void synthAppSetup() {
     return;
   }
 
-  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.16");
+  snprintf(overlayTitle, sizeof(overlayTitle), "DIN SYNTH v1.10.17");
   snprintf(overlaySub, sizeof(overlaySub), "WIFI OTA READY");
   overlayActive = true;
   overlayUntil = millis() + 850;
@@ -6503,7 +6598,7 @@ void synthAppLoop() {
 /*
   ======================================================================
   Module : DinMeter Synth Controller
-  Version: v1.10.16
+  Version: v1.10.17
   END
   ======================================================================
 */

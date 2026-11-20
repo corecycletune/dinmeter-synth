@@ -30,6 +30,10 @@
   Minimoog Model D / KORG MS-20 / Prophet-5 / Surge XT を、音声経路・変調・DinMeterへの応用可能性の軸で比較。
 
 
+## 第11回：FM位相変調と高音域の折り返し対策
+
+- [2026-11-20｜Plaitsの2-op FMと4倍オーバーサンプリング](2026-11-20-plaits-fm-phase-modulation.md) — `FMEngine::Render`精読。音声レートの位相変調、FM indexの高音域抑制、feedback経路、GM方式との違い。実機未検証。
+
 ## 第10回：残響ネットワークとメモリ・サンプルレート
 
 - [2026-11-19｜AMYの初期反射・4本帰還ディレイ・DSPメモリ](2026-11-19-amy-reverb-delay-network.md) — `delay.c`精読。リバーブ用リングバッファ27648サンプル（108KiB）、フィードバックLPF、44.1/48kHzでの固定遅延長の差。実機未検証。

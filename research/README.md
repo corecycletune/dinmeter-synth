@@ -30,6 +30,8 @@
 
 - [第11回｜Plaitsの2-op FM位相変調と折り返し対策](foundations/2026-11-20-plaits-fm-phase-modulation.md) — リング変調とは異なる位相変調、4倍oversampling、高音域FM index制限、符号別feedback。コード精読、実機未検証。
 
+- [第12回｜VCV Rackの表示曲線・内部値・平滑化の分離](foundations/2026-11-21-vcv-param-display-vs-engine.md) — ノブの指数写像と表示換算は別問題。SAM2695のHz/ms表示には音響較正が必要。v2ソースの該当関数確認、実機未検証。
+
 ## 安価な音源・DSP基板の調査（GM音源以外）
 
 GMのROM音源制御に限定せず、**波形そのものを合成できる音源構成や、アナログVCO/VCF/VCAを安く組める部品**も調査する。部品価格だけでなく、完成に必要な付属回路・入出力・現行DinMeterの再利用可能性も比較する。

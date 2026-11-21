@@ -70,6 +70,10 @@
 
 - [2026-11-11｜AMYの帯域制限OSC・osc/voice/synth階層・音声スレッド設計](2026-11-11-amy-dsp-architecture.md) — `oscillators.c`、`filters.c`、`amy.c`の関数を確認。実機検証なし。
 
+## 第12回：操作ノブの曲線と表示・平滑化の分離
+
+- [2026-11-21｜VCV Rack ParamQuantityの表示変換と平滑化API](2026-11-21-vcv-param-display-vs-engine.md) — displayBaseの指数/対数表示、値の逆変換、smoothEnabledと実音声補間の違い。SAM2695物理単位は未較正。実機未検証。
+
 ## 根拠になる一次・準一次資料
 
 ### メーカー公式資料

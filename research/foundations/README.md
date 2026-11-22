@@ -74,6 +74,11 @@
 
 - [2026-11-21｜VCV Rack ParamQuantityの表示変換と平滑化API](2026-11-21-vcv-param-display-vs-engine.md) — displayBaseの指数/対数表示、値の逆変換、smoothEnabledと実音声補間の違い。SAM2695物理単位は未較正。実機未検証。
 
+
+## 第13回：録音・スペクトル・時間変化の測定設計
+
+- [2026-11-22｜Audacity / SciPyを用いた音色測定プロトコル](2026-11-22-spectrum-measurement-protocol.md) — 定常倍音はFFT/PSD、ENVは短時間RMS、Glideは時間周波数解析で分離。ステレオ合算・窓長・正規化の反証を整理。実機未測定。
+
 ## 根拠になる一次・準一次資料
 
 ### メーカー公式資料

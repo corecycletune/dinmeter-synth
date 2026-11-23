@@ -121,3 +121,7 @@
 6. Wavetable/FM/PCM/GMと減算合成の境界
 
 調査結果からDinMeterに使える仮説が見つかれば`research/knowledge/`へ移す。未確定のまま実装へ入らない。
+
+## 第14回：SH-101のGate/Triggerと音程優先
+
+- [2026-11-23｜オリジナルSH-101のGate/Triggerと低音/後着音優先](2026-11-23-sh101-gate-trigger-priority.md) — Roland公式オリジナル取扱説明書と仕様で確認。ENV再トリガとMono優先順位が操作上結合。ソフト版・製造リビジョンは未確認、実機未試験。

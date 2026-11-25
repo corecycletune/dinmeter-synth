@@ -39,6 +39,18 @@ This repository contains the firmware and build automation for a compact hardwar
 - `README_FIRST.txt` — detailed hardware, behavior, and version notes
 - `.github/workflows/build-firmware.yml` — automated firmware build
 
+## Sound libraries
+
+Firmware v1.10.17 includes a curated 64-patch artist-inspired library across
+Funk/Bass, Lead, Jazz/Fusion, Neo Soul, Modern Synth, Dub, Dubstep and
+Experimental banks, plus eight standard GM sounds in bank 9.
+Each synth patch programs three layered source materials and sound-specific
+MOD envelope / LFO-to-filter or pitch routings.
+
+The new **ARTIST** library is active by default. Use **SYSTEM MENU → LIBRARY**
+to switch to **LEGACY** without overwriting legacy NVS saves.
+See [SOUNDBANK.md](SOUNDBANK.md) for the patch map and known limitations.
+
 ## Firmware update concept
 
 Development flow:
